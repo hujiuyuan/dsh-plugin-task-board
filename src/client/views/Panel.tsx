@@ -46,6 +46,22 @@ export function Panel({ ctx, source }: PanelProps) {
   // 找不到就自然关掉，比留一个指向空气的抽屉好。
   const selected = selectedId === undefined ? undefined : index.byId.get(selectedId)
 
+  /**
+   * 回会话页。
+   *
+   * **这个按钮是必须的，不是锦上添花。** 这个面板占了中间那一栏，
+   * 用户进来之后如果没有一条明确的回头路，就只能靠侧边栏——而侧边栏那一行
+   * 在窄窗口里可能被折起来。宿主提供 `ctx.layout.selectPanel(null)`
+   * 就是「回到会话」这个动作本身。
+   */
+  const backToConversation = (): void => {
+    try {
+      ctx.get('layout')?.selectPanel?.(null)
+    } catch {
+      // layout 不在场（换了外壳组合）时不做任何事，也不报错
+    }
+  }
+
   const openSession = (sessionId: string): boolean => {
     for (const name of ['uiWorkspace', 'workspaceNavigation']) {
       try {
@@ -66,6 +82,9 @@ export function Panel({ ctx, source }: PanelProps) {
   return (
     <div className="dsptb">
       <div className="dsptb-bar">
+        <button type="button" className="dsptb-btn" onClick={backToConversation} title="回到会话页">
+          ← 返回会话
+        </button>
         <span className="dsptb-title">规划视图</span>
         <div className="dsptb-seg" role="group" aria-label="切换视图">
           {VIEWS.map(item => (

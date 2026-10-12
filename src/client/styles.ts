@@ -44,16 +44,26 @@ export const CSS = `
   --tb-fs-14:var(--dsw-font-s-14-font-size,14px);
   --tb-lh:1.5;
 
-  position:absolute;
-  inset:0;
+  /* position:relative 而**不是** absolute/inset:0。
+     宿主的中央栏已经管好了这个面板的位置和尺寸（外壳把 main 座位挂进去，
+     那一列自己就是定位上下文）。写成 absolute 的后果是：找不到定位祖先时
+     它会以**视口**为基准铺满整个窗口，把侧边栏和 macOS 左上角那三个窗口按钮
+     一起盖住——用户既回不去也点不到关闭。这是真出过的事故，不是理论风险。 */
+  position:relative;
   display:flex;
   flex-direction:column;
+  width:100%;
+  height:100%;
+  min-width:0;
   min-height:0;
   background:var(--tb-bg);
   color:var(--tb-fg);
   font-size:var(--tb-fs-13);
   line-height:var(--tb-lh);
   overflow:hidden;
+  /* 不额外留 --dsh-frame-top-clearance：红黄绿三个按钮浮在**侧边栏**上方，
+     而这一栏在侧边栏右边，本来就够不着它们。真去留 48px 的话，
+     常见情况下只是白白多出一条缝。 */
 }
 .dsptb *,.dsptb *::before,.dsptb *::after{box-sizing:border-box}
 .dsptb button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
@@ -62,7 +72,10 @@ export const CSS = `
 .dsptb :focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--tb-brand));outline-offset:1px}
 
 /* ── 顶栏 ───────────────────────────────────────────── */
-.dsptb-bar{flex:none;display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--tb-line-1);background:var(--tb-l1)}
+/* 左内边距跟着宿主的「前导留白」变量走：侧边栏展开时这个变量是 0（算出来还是 0，
+   不产生任何多余缝隙），侧边栏一收起来宿主把它设成 160px，这一条就自动把
+   左上角那三个窗口按钮让出来。公式抄的是宿主会话页自己的写法。 */
+.dsptb-bar{flex:none;display:flex;align-items:center;gap:12px;padding:10px 16px 10px max(16px,calc(var(--dsh-frame-leading-clearance,0px) + 16px));border-bottom:1px solid var(--tb-line-1);background:var(--tb-l1)}
 .dsptb-title{font-size:var(--tb-fs-14);font-weight:600;white-space:nowrap}
 .dsptb-seg{display:inline-flex;gap:2px;padding:2px;border-radius:var(--tb-radius-sm);background:var(--tb-l2);border:1px solid var(--tb-line-1)}
 .dsptb-seg button{padding:4px 12px;border-radius:calc(var(--tb-radius-sm) - 1px);color:var(--tb-fg-2);white-space:nowrap;transition:background .12s,color .12s}
