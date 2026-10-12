@@ -41,13 +41,17 @@ export interface Enrichment {
   /** 能用的模型路由，`provider/model`。null = 这个部署问不出来。 */
   model: string | null
   setModel: (next: string) => void
-  /** 问模型。`force` 会无视缓存重问（用户点了「重新归纳」）。 */
-  run: (tasks: readonly TaskRecord[], force?: boolean) => Promise<void>
+  /**
+   * 问模型。`force` 会无视缓存重问（用户点了「重新归纳」）。
+   * `transcript` 是这次执行的会话内容，有的话一并喂给模型 —— 它是判断「这个任务
+   * 到底要干什么」最直接的证据，比标题和说明都准。
+   */
+  run: (tasks: readonly TaskRecord[], options?: { force?: boolean; transcript?: string }) => Promise<void>
   /**
    * 自动归纳：没归纳过、也没人改过的那些，问一次。
    * 只在有模型路由时动手，而且同一个任务在一次页面生命周期里只问一次。
    */
-  auto: (tasks: readonly TaskRecord[]) => void
+  auto: (tasks: readonly TaskRecord[], transcript?: string) => void
   /** 存一次人工改动。传空对象等于删掉这条改动。 */
   save: (taskId: string, override: Override) => Promise<void>
   /** 人工改动存不下的原因（例如宿主路由不在）。 */
@@ -102,7 +106,7 @@ export function useEnrichment(ctx: any): Enrichment {
     }
   }, [])
 
-  const run = useCallback(async (tasks: readonly TaskRecord[], force = false) => {
+  const run = useCallback(async (tasks: readonly TaskRecord[], options?: { force?: boolean; transcript?: string }) => {
     if (tasks.length === 0) return
     const ids = tasks.map(task => task.id)
     setRunning(ids)
@@ -114,8 +118,8 @@ export function useEnrichment(ctx: any): Enrichment {
         body: JSON.stringify({
           // 模型路由：谁绑了用自己的，没绑用页面上选中的那个
           model: tasks.find(task => typeof task.model === 'string' && task.model.length > 0)?.model ?? model ?? undefined,
-          force,
-          tasks: tasks.map(toMaterial),
+          force: options?.force === true,
+          tasks: tasks.map((task, index) => toMaterial(task, index === 0 ? options?.transcript : undefined)),
         }),
       })
       // 宿主路由压根不在（插件装成了只有浏览器半体的样子、或者版本对不上）时，
@@ -177,12 +181,12 @@ export function useEnrichment(ctx: any): Enrichment {
    * 为什么只跑一次：模型的调用要花钱，反复自动调用是那种用户第二天才发现账单的事。
    * 手动重来永远有 —— 抽屉里那个「重新归纳」。
    */
-  const auto = useCallback((tasks: readonly TaskRecord[]) => {
+  const auto = useCallback((tasks: readonly TaskRecord[], transcript?: string) => {
     if (model === null) return
     const fresh = tasks.filter(task => !asked.current.has(task.id) && ai[task.id] === undefined && overrides[task.id] === undefined)
     if (fresh.length === 0) return
     for (const task of fresh) asked.current.add(task.id)
-    void run(fresh)
+    void run(fresh, { transcript })
   }, [ai, model, overrides, run])
 
   return useMemo(
@@ -249,7 +253,7 @@ function readStoredModel(): string | null {
  * 标签。会话 id 一类的东西不发 —— 模型看不见会话，发过去只会让它以为自己
  * 该知道里面写了什么。
  */
-function toMaterial(task: TaskRecord): unknown {
+function toMaterial(task: TaskRecord, transcript?: string): unknown {
   return {
     id: task.id,
     title: task.title,
@@ -263,5 +267,9 @@ function toMaterial(task: TaskRecord): unknown {
       error: execution.error,
       minutes: execution.endedAt === undefined ? null : Math.round((execution.endedAt - execution.startedAt) / 60000),
     })),
+    // 会话内容**最有说服力，也最容易被误用**：它是任务真跑起来之后说的话，
+    // 但里面混着大量过程细节（读了哪个文件、报了什么错）。所以它是补充，
+    // 提示词里明说了「标题和说明优先」。
+    transcript,
   }
 }

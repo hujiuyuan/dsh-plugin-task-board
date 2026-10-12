@@ -94,10 +94,37 @@ const bad = (name, detail) => {
       })()
     },
   }
+  /**
+   * 假的任务看板宿主服务。**同时验契约**：扩展声明的 `apiVersion` 必须是 1，
+   * id 必须等于包名（它是 `integrations` 那份数据的键，写错就挂到别人名下）。
+   * 三个写方法都记下被怎么调的，再由路由那几条断言去核形状。
+   */
+  const boardCalls = []
+  const boardFace = {
+    create: (draft, options) => { boardCalls.push({ op: 'create', draft, options }); return { id: 'new-1', title: draft.title, status: draft.status ?? 'todo' } },
+    patchContent: (taskId, patch) => { boardCalls.push({ op: 'patch', taskId, patch }) },
+    setStatus: (taskId, status) => { boardCalls.push({ op: 'status', taskId, status }) },
+  }
+  let registered
+  const board = {
+    registerExtension: extension => { registered = extension; extension.start?.({ tasks: boardFace }); return () => { extension.stop?.() } },
+  }
+
   const ctx = {
     webServer: { register: route => { routes.set(route.path, route); return () => {} } },
     logger: { warn: message => warnings.push(message) },
     llm: fakeLlm,
+    // cordis 的注入：这里直接同步回调，模拟「服务都已经在了」。
+    // 两个服务各回调各的 —— 它们本来就是分开注册的，链式写会漏掉一个。
+    // 注入进来的 scope 是**子上下文**，除了新服务还继承着父上下文的全部东西
+    // （webServer / logger 都在）。这里照这个来，不然会验出一个不存在的 bug。
+    inject: (names, callback) => callback({
+      webServer: { register: route => { routes.set(route.path, route); return () => {} } },
+      logger: { warn: message => warnings.push(message) },
+      get: name => (name === 'taskBoard' ? board : name === 'llm' ? fakeLlm : undefined),
+      llm: names.includes('llm') ? fakeLlm : undefined,
+    }),
+    get: name => (name === 'taskBoard' ? board : name === 'llm' ? fakeLlm : undefined),
   }
   mod.apply(ctx)
   for (const [name, path] of [['health', mod.HEALTH_PATH], ['ledger', mod.LEDGER_PATH], ['enrich', mod.ENRICH_PATH], ['overrides', mod.OVERRIDES_PATH]]) {
@@ -193,6 +220,91 @@ const bad = (name, detail) => {
   else if (saved.acceptanceDone !== undefined) bad('host: 类型不对的字段被丢掉', JSON.stringify(saved.acceptanceDone))
   else if ('别的字段' in saved) bad('host: 不认识的键被丢掉', JSON.stringify(saved))
   else ok('host: 浏览器发上来的脏值被挡在盘外', JSON.stringify(saved))
+
+  // ── 写操作 ────────────────────────────────────────────────────────
+  //
+  // 这一块要验的是**三个边界**：走的是看板给的口子（不是直接改账本文件）、
+  // 看板不在场时说清楚、以及浏览器发上来的东西不会被当成合法动作。
+  if (registered === undefined) {
+    bad('host: 向任务看板注册了扩展', 'registerExtension 没被调用')
+  } else {
+    if (registered.apiVersion !== 1) bad('host: 扩展声明的 apiVersion 是 1', String(registered.apiVersion))
+    else if (registered.id !== pkg.name) bad('host: 扩展 id 等于包名', `id=${registered.id}`)
+    else ok('host: 向任务看板注册了扩展', `id=${registered.id} · apiVersion=${registered.apiVersion}`)
+  }
+
+  const ready = await call(mod.WRITE_PATH)
+  if (ready.body.ok !== true || ready.body.ready !== true) bad('host: 有看板时写入口是就绪的', JSON.stringify(ready.body))
+  else ok('host: 有看板时写入口是就绪的')
+
+  const created = await call(mod.WRITE_PATH, { method: 'POST', body: { op: 'create', draft: { title: '从自检建的卡', description: 'd', prompt: 'p', status: 'todo' } } })
+  if (created.body.ok !== true || created.body.task?.id !== 'new-1') bad('host: create 转给了看板', JSON.stringify(created.body))
+  else if (boardCalls.at(-1)?.draft?.title !== '从自检建的卡') bad('host: create 的 draft 原样传过去', JSON.stringify(boardCalls.at(-1)))
+  else ok('host: create 转给了看板并拿回 id', created.body.task.id)
+
+  const patched = await call(mod.WRITE_PATH, { method: 'POST', body: { op: 'patch', taskId: 't9', patch: { title: '改过的' } } })
+  if (patched.body.ok !== true || boardCalls.at(-1)?.op !== 'patch' || boardCalls.at(-1)?.taskId !== 't9') {
+    bad('host: patch 转给了看板', JSON.stringify([patched.body, boardCalls.at(-1)]))
+  } else ok('host: patch 转给了看板', JSON.stringify(boardCalls.at(-1).patch))
+
+  const moved = await call(mod.WRITE_PATH, { method: 'POST', body: { op: 'status', taskId: 't9', status: 'done' } })
+  if (moved.body.ok !== true || boardCalls.at(-1)?.op !== 'status') bad('host: setStatus 转给了看板', JSON.stringify([moved.body, boardCalls.at(-1)]))
+  else ok('host: setStatus 转给了看板', `${boardCalls.at(-1).taskId} → ${boardCalls.at(-1).status}`)
+
+  // 认不出的 op 要明确拒绝，**不能当没看见** —— 前端会以为成功了
+  const bogus = await call(mod.WRITE_PATH, { method: 'POST', body: { op: '删库', taskId: 't9' } })
+  if (bogus.body.ok !== false || bogus.body.reason !== 'refused' || !bogus.body.detail.includes('认不出')) {
+    bad('host: 认不出的操作被拒绝', JSON.stringify(bogus.body))
+  } else ok('host: 认不出的操作被拒绝', bogus.body.detail)
+
+  // 看板拒绝时把它的原话带回去（不是我们转述一遍）
+  boardFace.patchContent = () => { throw new Error('这张卡已经开始跑过了，它的标题/说明/提示不能再改') }
+  const refused = await call(mod.WRITE_PATH, { method: 'POST', body: { op: 'patch', taskId: 't9', patch: { title: 'x' } } })
+  if (refused.body.ok !== false || !refused.body.detail.includes('已经开始跑过了')) {
+    bad('host: 看板拒绝时原话带回去', JSON.stringify(refused.body))
+  } else ok('host: 看板拒绝时原话带回去')
+
+  // 看板不在场：写入口整个关掉，而且**不是错误** —— 看板本来就可能没装。
+  // 这里重新 import 一份（加个注释打散 URL 缓存），用另一个什么都不提供的 ctx 跑一遍。
+  const lonely = await import(`data:text/javascript;base64,${Buffer.from(`${code}\n// lonely`).toString('base64')}`)
+  const lonelyRoutes = new Map()
+  lonely.apply({
+    webServer: { register: route => { lonelyRoutes.set(route.path, route); return () => {} } },
+    logger: { warn: () => {} },
+    // 服务永远不出现：模拟看板没装
+    inject: () => {},
+    get: () => undefined,
+  })
+  // 归纳那条只接 POST（浏览器半体就是这么调它的），所以探它得带 body。
+  const probe = async (path, body) => {
+    let text = ''
+    await lonelyRoutes.get(path).handler(
+      {
+        method: body === undefined ? 'GET' : 'POST',
+        async *[Symbol.asyncIterator]() {
+          if (body !== undefined) yield Buffer.from(JSON.stringify(body))
+        },
+      },
+      { writeHead() {}, end(chunk) { text = chunk } },
+    )
+    return JSON.parse(text)
+  }
+  if (!lonelyRoutes.has(mod.WRITE_PATH)) {
+    bad('host: 看板不在场时也注册写路由', [...lonelyRoutes.keys()].join(', '))
+  } else {
+    const gate = await probe(mod.WRITE_PATH)
+    if (gate.ready !== false) bad('host: 看板不在场时写入口是关的', JSON.stringify(gate))
+    else ok('host: 看板不在场时写入口是关的并给了原因', gate.detail)
+  }
+  if (!lonelyRoutes.has(mod.ENRICH_PATH)) {
+    // 路由整个不在 = 浏览器拿到 404，于是报「宿主半体可能没装上」——
+    // 完全指错方向的结论。所以这条断言盯的是「路由在不在」，不是它答什么。
+    bad('host: 没有 llm 服务时也注册归纳路由', [...lonelyRoutes.keys()].join(', '))
+  } else {
+    const gate = await probe(mod.ENRICH_PATH, { model: 'x/y', tasks: [{ id: 't1', title: '自检任务' }] })
+    if (gate.ok !== false || gate.reason !== 'no-model') bad('host: 没有 llm 时归纳报 no-model', JSON.stringify(gate))
+    else ok('host: 没有 llm 时归纳报 no-model', gate.detail)
+  }
 
   await rm(sandbox, { recursive: true, force: true })
 

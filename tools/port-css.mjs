@@ -330,6 +330,23 @@ const TAIL = `
 }
 .dsptb .sro-human{font-size:12px;color:var(--label-tertiary)}
 
+/* 会话内容。**这不是宿主的会话页**，是我们自己画的一份只读记录：
+   所以样式上刻意朴素（没有头像、没有气泡尾巴、没有工具卡片），
+   一眼看得出来它跟宿主那个不是同一个东西。 */
+.dsptb .tr-list{display:flex;flex-direction:column;gap:8px;max-height:420px;overflow:auto;padding-right:2px}
+.dsptb .tr-line{display:flex;gap:8px;font-size:13px;line-height:1.65}
+.dsptb .tr-who{
+  flex:0 0 42px;font-size:10px;line-height:20px;color:var(--label-tertiary);
+  text-align:right;user-select:none;
+}
+.dsptb .tr-body{min-width:0;white-space:pre-wrap;word-break:break-word}
+/* 用户说的那几句加一道左侧的线：一屏里大部分是助手的长段文字，
+   不把「人说了什么」拎出来，扫的时候找不到自己发过的话 */
+.dsptb .tr-user .tr-body{
+  border-left:2px solid var(--brand);padding-left:9px;color:var(--label-primary);
+}
+.dsptb .tr-assistant .tr-body{color:var(--label-secondary)}
+
 /* 「会话」那一页正在看的那一次执行，在这一列里标出来 */
 .dsptb .d-ex.on{border-color:var(--brand);background:var(--bg-layer-2)}
 .dsptb .d-ex .cur-mark{

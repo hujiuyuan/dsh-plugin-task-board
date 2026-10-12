@@ -74,6 +74,7 @@ export const HEALTH_PATH = '/api/dsh-plugin-task-board/health'
 export const LEDGER_PATH = '/api/dsh-plugin-task-board/ledger'
 export const ENRICH_PATH = '/api/dsh-plugin-task-board/enrich'
 export const OVERRIDES_PATH = '/api/dsh-plugin-task-board/overrides'
+export const WRITE_PATH = '/api/dsh-plugin-task-board/task'
 
 /**
  * 插件自己的目录名，在 `$DSH_HOME` 下面。
@@ -285,11 +286,29 @@ export function apply(ctx: HostContext): void {
   })
 
   /**
-   * 归纳那条路由要模型，所以挂在 `ctx.inject(['llm'], ...)` 里面。
+   * 宿主注入的模型服务。**可能永远不到**（这个部署就没有），所以它是可选的：
+   * 下面用 `ctx.inject` 等它，等到了就记下来。
+   */
+  let llm: LlmFace | undefined
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['llm'], (scope: HostContext) => {
+      llm = scope.llm ?? (scope.get?.('llm') as LlmFace | undefined)
+    })
+  } else {
+    llm = ctx.llm
+  }
+
+  /**
+   * 归纳那条路由。
    *
-   * 这么挂的用意是**降级而不是失败**：这个部署没有 llm 服务时，这一段整个不跑，
-   * 但账本和人工改动那几条路由照常在。用户看到的是「AI 补全这个按钮不能用」，
-   * 不是「整个插件坏了」。
+   * **它是无条件注册的**，哪怕模型服务永远不出现。这一点改过一次：
+   * 早先把整条路由挂在 `ctx.inject(['llm'], ...)` 里面，没有模型的部署上
+   * 那条路由根本不存在，浏览器拿到的是 404，于是报「宿主半体可能没装上」——
+   * 一个完全指错方向的结论（半体装着呢，只是没有模型）。
+   *
+   * 注册路由和有没有模型是两件事：路由负责**把话说清楚**，
+   * 模型在不在只决定它说什么。没有模型就答 `no-model` 并说明原因，
+   * 界面上是「这个部署没有模型服务」，不是一个 404。
    */
   const registerEnrich = (scope: HostContext): void => {
     scope.webServer?.register({
@@ -320,9 +339,12 @@ export function apply(ctx: HostContext): void {
           return
         }
 
-        const llm = scope.llm ?? (scope.get?.('llm') as LlmFace | undefined)
         if (llm === undefined || typeof llm.stream !== 'function') {
-          json(res, 200, { ok: false, reason: 'no-model', detail: '这个部署没有提供模型服务（llm）' })
+          json(res, 200, {
+            ok: false,
+            reason: 'no-model',
+            detail: '这个部署没有提供模型服务（llm）。下面四条仍然按账本推出来，不受影响。',
+          })
           return
         }
 
@@ -353,7 +375,8 @@ export function apply(ctx: HostContext): void {
             continue
           }
           try {
-            const ai = await enrichOnce(llm, route, renderMaterial(material), undefined)
+            // 上面已经确认过 llm 在，这里断言一下类型
+            const ai = await enrichOnce(llm as LlmFace, route, renderMaterial(material), undefined)
             store.cache[material.id] = { fingerprint, ai, at: Date.now(), model }
             changed = true
             results[material.id] = { ai, cached: false }
@@ -390,8 +413,163 @@ export function apply(ctx: HostContext): void {
     })
   }
 
-  if (typeof ctx.inject === 'function') ctx.inject(['llm'], registerEnrich)
-  else registerEnrich(ctx)
+  // **无条件注册**，不等 llm。等的话，没有模型的部署上这条路由根本不存在，
+  // 浏览器拿到的会是 404（「宿主半体没装上」），而不是「没有模型服务」。
+  registerEnrich(ctx)
+
+  registerWriteRoute(ctx, webServer)
+}
+
+/**
+ * 任务看板的**宿主半体**提供的服务名。和它浏览器半体那个同名，但两个进程里
+ * 是两回事：这边的面只有 `registerExtension` 和 `isExtensionEnabled`。
+ */
+const BOARD_SERVICE = 'taskBoard'
+
+/** 我们作为一个扩展注册上去的 id。也是 `integrations` 里那份数据的键。 */
+export const EXTENSION_ID = name
+
+/** 看板自己声明的扩展契约版本。对不上它会**抛错**，不是降级。 */
+const EXTENSION_API_VERSION = 1
+
+/** 看板交给扩展的那把能力面。只写我们真正用到的三个方法。 */
+interface BoardTasksFace {
+  create(draft: Record<string, unknown>, options?: Record<string, unknown>): { id: string; title: string; status: string }
+  patchContent(taskId: string, patch: Record<string, unknown>): void
+  setStatus(taskId: string, status: string, initiator?: string): void
+}
+
+interface BoardFace {
+  registerExtension(extension: Record<string, unknown>): () => void
+}
+
+/**
+ * 写操作。
+ *
+ * ## 为什么绕这一圈，不直接改账本文件
+ *
+ * 账本是任务看板的私有文件。第三方插件直接往里写，绕过的是看板**自己的**
+ * 两道闸：创建时的字段校验，和「已经跑过的卡不许改内容」这条规矩
+ * （`patchContent` 的注释原话：a task that has started executing keeps its
+ * recorded title/description/prompt）。绕过去写，出来的是一份看板自己都读不懂
+ * 的账本——而且是在它下次启动时才炸。
+ *
+ * 所以走它给的口子：`ctx.get('taskBoard').registerExtension(...)`，
+ * 拿到 `host.tasks`，所有写都经过它的闸。
+ *
+ * ## 三个必须说清的边界
+ *
+ * 1. **看板不在场就没有写**。它的宿主半体没加载时这条路由怎么都不通，
+ *    界面上的写入口一律禁用并说明原因 —— 不做「点了才拒绝」。
+ * 2. **一次只做一件事**。没有批量写、没有事务。看板那边每次调用都是一个完整的
+ *    校验加落盘，我们不在中间插自己的逻辑。
+ * 3. **扩展注册是可选的**：`ctx.inject([BOARD_SERVICE], ...)` 等到它出现才注册。
+ *    看板晚加载也能接上，永远不加载就永远没有写入口。
+ */
+function registerWriteRoute(ctx: HostContext, webServer: { register(route: WebServerRoute): () => void }): void {
+  /** 看板交出来的能力面；扩展没启动时是 undefined。 */
+  let tasks: BoardTasksFace | undefined
+
+  const attach = (scope: HostContext): void => {
+    const board = (scope.get?.(BOARD_SERVICE) ?? (scope as { [k: string]: unknown })[BOARD_SERVICE]) as BoardFace | undefined
+    if (board === undefined || typeof board.registerExtension !== 'function') return
+    try {
+      board.registerExtension({
+        id: EXTENSION_ID,
+        apiVersion: EXTENSION_API_VERSION,
+        // start/stop 是看板的开关控制的：它把扩展停掉之后，我们不持有失效的面
+        start: (host: { tasks: BoardTasksFace }) => { tasks = host.tasks },
+        stop: () => { tasks = undefined },
+      })
+    } catch (error) {
+      // 版本对不上时看板会抛。这是**真的出了问题**（我们和它不同版），要留痕
+      ctx.logger?.warn(`[${name}] 注册扩展失败：${String(error)}`)
+    }
+  }
+
+  if (typeof ctx.inject === 'function') ctx.inject([BOARD_SERVICE], attach)
+  else attach(ctx)
+
+  webServer.register({
+    kind: 'exact',
+    path: WRITE_PATH,
+    handler: async (req: any, res: any) => {
+      // GET = 「能不能写」。界面靠这个决定写入口是亮着还是禁用 ——
+      // 不做「点了才拒绝」：一个能按但按下去只弹「不行」的按钮，比灰着更气人。
+      if (req?.method !== 'POST') {
+        json(res, 200, {
+          ok: true,
+          ready: tasks !== undefined,
+          ...(tasks === undefined
+            ? { detail: '任务看板的宿主半体没加载（或者它的扩展开关关着），所以没有写入口' }
+            : {}),
+        })
+        return
+      }
+
+      let body: Record<string, unknown>
+      try {
+        body = JSON.parse(await readBody(req)) as Record<string, unknown>
+      } catch (error) {
+        json(res, 200, { ok: false, reason: 'bad-request', detail: String(error) })
+        return
+      }
+
+      if (tasks === undefined) {
+        json(res, 200, {
+          ok: false,
+          reason: 'board-absent',
+          detail: '任务看板的宿主半体没加载（或者它的扩展开关关着），所以没有写入口。去任务看板里直接改。',
+        })
+        return
+      }
+
+      try {
+        json(res, 200, { ok: true, ...performWrite(tasks, body) })
+      } catch (error) {
+        // 看板拒绝时抛的错**原样带回去**。它比我们清楚为什么不行
+        // （标题为空、卡冻结了、跑过的卡不许改内容……），转述一遍只会丢信息。
+        json(res, 200, {
+          ok: false,
+          reason: 'refused',
+          detail: error instanceof Error ? error.message : String(error),
+        })
+      }
+    },
+  })
+}
+
+/**
+ * 一次写。**动作名是白名单**：浏览器发上来的 op 认不出就拒绝，
+ * 不做「当作没看见」——那样前端会以为成功了。
+ */
+function performWrite(tasks: BoardTasksFace, body: Record<string, unknown>): Record<string, unknown> {
+  const op = body.op
+  if (op === 'create') {
+    const draft = body.draft
+    if (typeof draft !== 'object' || draft === null) throw new Error('create 要带 draft')
+    const created = tasks.create(draft as Record<string, unknown>)
+    return { task: { id: created.id, title: created.title, status: created.status } }
+  }
+
+  const taskId = body.taskId
+  if (typeof taskId !== 'string' || taskId.length === 0) throw new Error('这个动作要带 taskId')
+
+  if (op === 'patch') {
+    const patch = body.patch
+    if (typeof patch !== 'object' || patch === null) throw new Error('patch 要带 patch')
+    tasks.patchContent(taskId, patch as Record<string, unknown>)
+    return { taskId }
+  }
+
+  if (op === 'status') {
+    const status = body.status
+    if (typeof status !== 'string') throw new Error('status 要带 status')
+    tasks.setStatus(taskId, status)
+    return { taskId, status }
+  }
+
+  throw new Error(`认不出的操作「${String(op)}」`)
 }
 
 /** 只收我们认得的形状。模型的入参来自浏览器，是外部输入。 */

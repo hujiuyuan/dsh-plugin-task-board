@@ -11,14 +11,17 @@
 import { useEffect, useMemo, useState } from 'react'
 import { deriveIntent } from '../derive'
 import { useEnrichment } from '../enrich'
-import { buildIndex } from '../model'
+import { buildIndex, lastExecution } from '../model'
 import type { TaskRecord } from '../types'
 import type { TaskSource } from '../data'
+import { transcriptForModel, useTranscript } from '../session'
 import { useWorkspaces } from '../workspaces'
+import { useBoardWrite } from '../write'
 import { Board } from './Board'
 import { Drawer } from './Drawer'
 import { Gantt } from './Gantt'
 import { Progress } from './Progress'
+import { TaskForm } from './TaskForm'
 
 type View = 'board' | 'gantt' | 'progress'
 
@@ -44,6 +47,9 @@ export function Panel({ ctx, source }: PanelProps) {
   const [lanes, setLanes] = useState(false)
   /** 甘特/进度自己的筛选被「清空全部」清掉时，靠这个数把它们重置。 */
   const [resetToken, setResetToken] = useState(0)
+  /** 表单开着的时候是新建（`'new'`）还是编辑某一张卡。 */
+  const [form, setForm] = useState<'new' | 'edit' | undefined>(undefined)
+  const [toast, setToast] = useState<string | undefined>(undefined)
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), TICK_MS)
@@ -58,6 +64,15 @@ export function Panel({ ctx, source }: PanelProps) {
   const workspaces = useWorkspaces(ctx, workspaceIds)
 
   const enrichment = useEnrichment(ctx)
+  const write = useBoardWrite()
+
+  // 提示条自己会走。3 秒是量出来的：短于 2 秒读不完一句话，
+  // 长于 4 秒就开始挡着下面的东西了
+  useEffect(() => {
+    if (toast === undefined) return
+    const timer = setTimeout(() => setToast(undefined), 3000)
+    return () => clearTimeout(timer)
+  }, [toast])
 
   const selected = selectedId === undefined ? undefined : index.byId.get(selectedId)
 
@@ -74,13 +89,26 @@ export function Panel({ ctx, source }: PanelProps) {
 
   // 打开一张卡时自动归纳一次（只在有模型路由、且这张卡一条都没有的时候）。
   // 依赖里只放 id：`enrichment.auto` 每次渲染都是新函数，放进来会无限循环。
-  const selectedTaskId = selected?.id
+  /**
+   * 最近一次执行的那个会话的内容。
+   *
+   * 只在抽屉开着的时候读 —— `sessions.using` 会把会话 retain 住，
+   * 看板页面上十几张卡全都去 retain 一遍是没必要的开销。
+   */
+  const lastSessionId = selected === undefined ? undefined : lastExecution(selected)?.sessionId
+  const transcript = useTranscript(ctx, selected === undefined ? undefined : lastSessionId)
+
   const autoEnrich = enrichment.auto
+  const selectedTaskId = selected?.id
+  const transcriptText = useMemo(() => transcriptForModel(transcript.lines), [transcript.lines])
   useEffect(() => {
     if (selected === undefined) return
-    autoEnrich([selected])
+    // 会话还在读的时候不急着问模型：多等一会儿能带上会话内容，归纳质量差很多。
+    // idle/unavailable 说明这个任务根本没有会话，那就直接问。
+    if (transcript.state === 'loading') return
+    autoEnrich([selected], transcriptText)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTaskId])
+  }, [selectedTaskId, transcript.state])
 
   const backToConversation = (): void => {
     try {
@@ -135,6 +163,20 @@ export function Panel({ ctx, source }: PanelProps) {
         <h1>规划视图</h1>
         <SourceBadge source={source} />
         <span className="spacer" />
+        <button
+          type="button"
+          className="icon-btn icon-add"
+          // 没有写入口时按钮禁用，**原因写在按钮自己的 title 上**，
+          // 不做「点了才弹窗说不行」
+          disabled={!write.ready}
+          title={write.ready ? '新建一张任务卡' : `新建要写账本，但现在写不了：${write.why ?? '未知原因'}`}
+          aria-label="新建任务"
+          onClick={() => setForm('new')}
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+            <path d="M8 3.5v9M3.5 8h9" />
+          </svg>
+        </button>
         <div className="seg seg-view" role="group" aria-label="切换视图">
           {VIEWS.map(item => (
             <button key={item.id} type="button" aria-pressed={view === item.id} onClick={() => setView(item.id)}>
@@ -208,7 +250,32 @@ export function Panel({ ctx, source }: PanelProps) {
           onOpenSession={openSession}
           intent={intent}
           enrichment={enrichment}
+          write={write}
+          onEdit={() => setForm('edit')}
+          transcript={transcript}
+          {...(transcriptText === undefined ? {} : { transcriptText })}
         />
+      ) : null}
+
+      {form !== undefined ? (
+        <TaskForm
+          // 换一张卡（或者从编辑切到新建）就重挂，表单不会带着上一张的内容
+          key={form === 'edit' ? `edit-${selectedId}` : 'new'}
+          {...(form === 'edit' && selected !== undefined ? { editing: selected } : {})}
+          index={index}
+          workspaces={workspaces}
+          write={write}
+          onClose={() => { write.clearError(); setForm(undefined) }}
+          onDone={(message, openId) => {
+            setForm(undefined)
+            setToast(message)
+            if (openId !== undefined) setSelectedId(openId)
+          }}
+        />
+      ) : null}
+
+      {toast !== undefined ? (
+        <div className="toast show" role="status">{toast}</div>
       ) : null}
     </div>
   )

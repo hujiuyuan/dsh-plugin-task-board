@@ -14,8 +14,10 @@ import { PRIORITY_LABEL } from '../derive'
 import type { Enrichment } from '../enrich'
 import type { TaskIndex } from '../model'
 import { durationOf, humanCron, humanDuration, isRunning, lastExecution, outcomeLabel, rollupOf, shortTime, spanEnd, triggerOf } from '../model'
+import type { Transcript } from '../session'
 import type { TaskRecord } from '../types'
 import type { WorkspaceIndex } from '../workspaces'
+import type { BoardWrite } from '../write'
 import { FieldBlock, IconClock, SourceTag } from './controls'
 
 type Tab = 'conversation' | 'goal' | 'subtasks' | 'schedule'
@@ -32,6 +34,13 @@ interface DrawerProps {
   /** 四条推出来的意图字段 + 它们的来源与改动。 */
   intent: Intent
   enrichment: Enrichment
+  /** 写入口。没有时「编辑」按钮禁用，原因写在按钮上。 */
+  write: BoardWrite
+  onEdit: () => void
+  /** 最近一次执行的会话内容。 */
+  transcript: Transcript
+  /** 同一份内容，掐好长度给模型用。没有会话时是 undefined。 */
+  transcriptText?: string
 }
 
 /** 这个任务该用哪个模型：它自己绑的优先，没绑就用页面上选中的那个。 */
@@ -39,7 +48,7 @@ function modelFor(task: TaskRecord, fallback: string | null): string | null {
   return task.model !== undefined && task.model.length > 0 ? task.model : fallback
 }
 
-export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOpenSession, intent, enrichment }: DrawerProps) {
+export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOpenSession, intent, enrichment, write, onEdit, transcript, transcriptText }: DrawerProps) {
   const [tab, setTab] = useState<Tab>('conversation')
   const [copied, setCopied] = useState(false)
 
@@ -99,6 +108,17 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
             <span style={{ width: 7, height: 7, borderRadius: '50%', background: STATUS[task.status].css }} aria-hidden="true" />
             {STATUS[task.status].label}
           </span>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={!write.ready}
+            title={write.ready
+              ? '改标题 / 说明 / 执行提示，或者换一列'
+              : `编辑要走任务看板的写入契约，但现在走不通：${write.why ?? '未知原因'}`}
+            onClick={onEdit}
+          >
+            编辑
+          </button>
           <button type="button" className="btn btn-secondary" onClick={onClose} aria-label="关闭">✕</button>
         </div>
 
@@ -132,22 +152,28 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
                       <div className="row"><span className="k">开始</span><span className="v">{new Date(last.startedAt).toLocaleString()}</span></div>
                       <div className="row"><span className="k">现状</span><span className="v">{running ? `正在跑，已跑 ${humanDuration(now - last.startedAt)}` : `${outcomeLabel(last)} · 耗时 ${humanDuration(durationOf(last, now))}`}</span></div>
                     </div>
-                    <p className="view-note" style={{ marginTop: 10 }}>
-                      真实的会话内容还没内嵌进来（要把宿主的会话页搬进这个抽屉）。
-                      现在点下面的按钮先把宿主切到那个会话。
-                    </p>
                     <button type="button" className="btn btn-secondary" style={{ marginTop: 8 }} onClick={openSession}>
-                      {copied ? '会话 id 已复制' : '打开会话'}
+                      {copied ? '会话 id 已复制' : '在宿主里打开这个会话'}
                     </button>
                   </>
                 )}
               </div>
+
+              {last?.sessionId === undefined ? null : (
+                <div className="d-sec" style={{ marginTop: 16 }}>
+                  <div className="d-sec-head">
+                    <h3>这次跑了什么</h3>
+                    <span className="view-note" style={{ marginLeft: 'auto' }}>只读，不是宿主的会话页</span>
+                  </div>
+                  <TranscriptView transcript={transcript} />
+                </div>
+              )}
             </div>
           ) : null}
 
           {tab === 'goal' ? (
             <>
-              <IntentPane task={task} intent={intent} enrichment={enrichment} />
+              <IntentPane task={task} intent={intent} enrichment={enrichment} transcriptText={transcriptText} />
 
               <div className="d-sec">
                 <h3>账本原文</h3>
@@ -339,7 +365,7 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
  * 这里的做法是把它们**推出来**，并且逐条标出处。原件（说明和 prompt 原文）
  * 一个字不删，挪到下面「账本原文」里——推出来的东西永远不能盖掉原始记录。
  */
-function IntentPane({ task, intent, enrichment }: { task: TaskRecord; intent: Intent; enrichment: Enrichment }) {
+function IntentPane({ task, intent, enrichment, transcriptText }: { task: TaskRecord; intent: Intent; enrichment: Enrichment; transcriptText?: string }) {
   const [open, setOpen] = useState(true)
   const busy = enrichment.running.includes(task.id)
   const model = modelFor(task, enrichment.model)
@@ -366,8 +392,8 @@ function IntentPane({ task, intent, enrichment }: { task: TaskRecord; intent: In
           disabled={busy || model === null}
           title={model === null
             ? '这个部署问不出模型路由（宿主的 llm 服务没接上，或者模型目录为空）。下面四条仍然按账本推出来。'
-            : '让模型重读这张卡的标题、说明、执行提示和执行记录，重新归纳四条。'}
-          onClick={() => void enrichment.run([task], true)}
+            : '让模型重读这张卡的标题、说明、执行提示、执行记录和会话内容，重新归纳四条。'}
+          onClick={() => void enrichment.run([task], { force: true, ...(transcriptText === undefined ? {} : { transcript: transcriptText }) })}
         >
           {busy ? '归纳中…' : enrichment.ai[task.id] === undefined ? '用模型补全' : '重新归纳'}
         </button>
@@ -562,6 +588,49 @@ function ScheduleSection({ schedule }: { schedule: NonNullable<TaskRecord['sched
           <p className="ro-reason">{why}。</p>
         </div>
       ) : null}
+    </div>
+  )
+}
+
+/**
+ * 会话内容的只读记录。
+ *
+ * 四种状态各自说自己的话，**没有一种是把这一块留空**：
+ * 读到了就画，还在读就说在读，读不动就说为什么（宿主给的原话），
+ * 读到了但是空的就说「这个会话里没有对话」。
+ */
+function TranscriptView({ transcript }: { transcript: Transcript }) {
+  if (transcript.state === 'idle') {
+    return <p className="d-empty">这个任务还没跑过，没有会话。</p>
+  }
+  if (transcript.state === 'loading') {
+    return <p className="d-empty">正在读会话…</p>
+  }
+  if (transcript.state === 'unavailable') {
+    return (
+      <>
+        <p className="fb-error" style={{ marginBottom: 0 }}>
+          读不到会话内容：{transcript.why}
+        </p>
+        <p className="view-note" style={{ marginTop: 8 }}>
+          抽屉其余部分不受影响。会话内容要宿主提供了会话服务才读得到——它不在场时，
+          上面那个「在宿主里打开这个会话」还是能用的。
+        </p>
+      </>
+    )
+  }
+  if (transcript.lines.length === 0) {
+    return <p className="d-empty">这个会话里没有对话（可能刚开、或者只有工具调用）。</p>
+  }
+  return (
+    <div className="tr-list">
+      {transcript.hasMore ? <p className="view-note">更早的内容没读进来，这里只显示最近一段。</p> : null}
+      {transcript.lines.map((line, index) => (
+        <div key={`${line.at}-${index}`} className={`tr-line tr-${line.who}`}>
+          <span className="tr-who">{line.who === 'user' ? '你说' : 'DSH'}</span>
+          <span className="tr-body">{line.text}</span>
+        </div>
+      ))}
     </div>
   )
 }

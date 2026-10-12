@@ -61,11 +61,15 @@ export interface AiIntent {
 export const SYSTEM_PROMPT = [
   '你在给一个任务看板上的卡片补写四个字段。',
   '',
-  '你会收到一张卡的真实素材：标题、说明、执行提示、状态、定时规则、历次执行的结果。',
+  '你会收到一张卡的真实素材：标题、说明、执行提示、状态、定时规则、历次执行的结果，',
+  '以及（如果有的话）它上一次跑的时候会话里说过的话。',
+  '',
   '你**只能**用这些素材里的信息。这是硬规矩：',
   '- 素材里没有的事实，一个字都不许编。不要推测这个任务「大概是为了什么」。',
   '- 哪一条素材不够，就把对应的键留空字符串或空数组。**留空比瞎填好得多。**',
   '- 不要复述素材原文，要把它整理成一句人能直接读懂的话。',
+  '- 会话内容排最后、也最不可靠：里面混着大量过程细节（读了哪个文件、报了什么错）。',
+  '  它只在跟标题、说明、执行提示对得上的时候才用。**前面那些字段优先。**',
   '',
   '只回一个 JSON 对象，别的什么都不要，键固定是这四个：',
   '{"goal": string, "scenario": string, "background": string, "acceptance": string[], "confidence": "low"|"medium"|"high"}',
@@ -91,6 +95,11 @@ export interface Material {
   schedule?: { enabled: boolean; cron: string }
   runs: Array<{ result: string; error?: string; minutes: number | null }>
   tags?: string[]
+  /**
+   * 会话内容（用户和助手说过的话），已经在客户端掐过一次长度。
+   * 没有会话、读不动、或者这个部署没有会话服务时是 undefined。
+   */
+  transcript?: string
 }
 
 /**
@@ -122,6 +131,12 @@ export function renderMaterial(material: Material): string {
       const took = run.minutes === null ? '还没结束' : `耗时 ${run.minutes} 分钟`
       lines.push(`  - ${run.result}，${took}${run.error === undefined ? '' : `，报错：${run.error}`}`)
     }
+  }
+
+  // 会话内容放在最后，并且**自成一段**：它是唯一一段「任务真跑起来之后说的话」，
+  // 模型很容易被它带着走（里面全是过程细节），所以前面所有字段都在它上面。
+  if (material.transcript !== undefined && material.transcript.trim().length > 0) {
+    lines.push('', '这个任务上一次跑的时候，会话里说了这些（仅供参考，上面那些字段优先）：', material.transcript.trim())
   }
 
   const text = lines.join('\n')
