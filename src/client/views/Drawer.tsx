@@ -9,11 +9,14 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import { STATUS, hueOf } from '../tokens'
+import type { Intent, Override } from '../derive'
+import { PRIORITY_LABEL } from '../derive'
+import type { Enrichment } from '../enrich'
 import type { TaskIndex } from '../model'
 import { durationOf, humanCron, humanDuration, isRunning, lastExecution, outcomeLabel, rollupOf, shortTime, spanEnd, triggerOf } from '../model'
 import type { TaskRecord } from '../types'
 import type { WorkspaceIndex } from '../workspaces'
-import { IconClock } from './controls'
+import { FieldBlock, IconClock, SourceTag } from './controls'
 
 type Tab = 'conversation' | 'goal' | 'subtasks' | 'schedule'
 
@@ -26,9 +29,17 @@ interface DrawerProps {
   onNavigate: (task: TaskRecord) => void
   /** 打开会话页。拿不到通道时返回 false，抽屉退回到「复制会话 id」。 */
   onOpenSession: (sessionId: string) => boolean
+  /** 四条推出来的意图字段 + 它们的来源与改动。 */
+  intent: Intent
+  enrichment: Enrichment
 }
 
-export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOpenSession }: DrawerProps) {
+/** 这个任务该用哪个模型：它自己绑的优先，没绑就用页面上选中的那个。 */
+function modelFor(task: TaskRecord, fallback: string | null): string | null {
+  return task.model !== undefined && task.model.length > 0 ? task.model : fallback
+}
+
+export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOpenSession, intent, enrichment }: DrawerProps) {
   const [tab, setTab] = useState<Tab>('conversation')
   const [copied, setCopied] = useState(false)
 
@@ -136,8 +147,10 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
 
           {tab === 'goal' ? (
             <>
+              <IntentPane task={task} intent={intent} enrichment={enrichment} />
+
               <div className="d-sec">
-                <h3>说明</h3>
+                <h3>账本原文</h3>
                 {task.description.length > 0 ? (
                   <p style={{ fontSize: 14, lineHeight: 1.65 }}>{task.description}</p>
                 ) : (
@@ -332,6 +345,145 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
         </div>
       </aside>
     </>
+  )
+}
+
+/**
+ * 「任务目标」这一页的主体：目标 / 场景 / 背景 / 验收四条，外加源头那条说明。
+ *
+ * 这一页原来的样子是「说明 + prompt 原文」——两段账本原文，用户看一眼就知道
+ * 这个任务是什么，但**看不出它要达成什么**。原型里那四条（目标/场景/背景/验收）
+ * 对应的正是「一眼看出」这件事，而真实账本里一条都没有。
+ *
+ * 这里的做法是把它们**推出来**，并且逐条标出处。原件（说明和 prompt 原文）
+ * 一个字不删，挪到下面「账本原文」里——推出来的东西永远不能盖掉原始记录。
+ */
+function IntentPane({ task, intent, enrichment }: { task: TaskRecord; intent: Intent; enrichment: Enrichment }) {
+  const [open, setOpen] = useState(true)
+  const busy = enrichment.running.includes(task.id)
+  const model = modelFor(task, enrichment.model)
+  const edited = enrichment.overrides[task.id] ?? {}
+
+  const save = (patch: Partial<Override>): void => {
+    const next = { ...edited, ...patch }
+    for (const [key, value] of Object.entries(next)) {
+      if (value === undefined || value === '') delete (next as Record<string, unknown>)[key]
+    }
+    void enrichment.save(task.id, next)
+  }
+
+  return (
+    <div className="d-sec">
+      <div className="d-sec-head">
+        <h3>任务目标</h3>
+        <span className="view-note" style={{ marginLeft: 'auto' }}>
+          {model === null ? '没找到可用的模型' : `模型：${model}`}
+        </span>
+        <button
+          type="button"
+          className="btn btn-secondary"
+          disabled={busy || model === null}
+          title={model === null
+            ? '这个部署问不出模型路由（宿主的 llm 服务没接上，或者模型目录为空）。下面四条仍然按账本推出来。'
+            : '让模型重读这张卡的标题、说明、执行提示和执行记录，重新归纳四条。'}
+          onClick={() => void enrichment.run([task], true)}
+        >
+          {busy ? '归纳中…' : enrichment.ai[task.id] === undefined ? '用模型补全' : '重新归纳'}
+        </button>
+        <button type="button" className="btn btn-secondary" onClick={() => setOpen(value => !value)}>
+          {open ? '收起' : '展开'}
+        </button>
+      </div>
+
+      {enrichment.error !== null && enrichment.running.length === 0 ? (
+        <p className="fb-error">
+          模型那条路没走通（{enrichment.error.reason}）：{enrichment.error.detail}
+          <br />
+          <span className="thin">下面四条是按账本推的，不受影响。</span>
+        </p>
+      ) : null}
+
+      {open ? (
+        <>
+          <FieldBlock
+            label="目标"
+            field={intent.goal}
+            hint="这个任务要达成什么"
+            onSave={next => save({ goal: next })}
+          />
+          <FieldBlock
+            label="使用场景"
+            field={intent.scenario}
+            hint="什么时候会跑它"
+            onSave={next => save({ scenario: next })}
+          />
+          <FieldBlock
+            label="背景"
+            field={intent.background}
+            hint="这件事是怎么来的"
+            onSave={next => save({ background: next })}
+          />
+
+          <div className="fblock">
+            <div className="fb-head">
+              <span className="k">验收</span>
+              <SourceTag
+                source={intent.acceptance[0]?.source ?? 'derived'}
+                why="条目本身来自账本里的执行记录，勾没勾是人的判断"
+              />
+              <span className="fb-hint">凭哪些事实算它做完了</span>
+            </div>
+            <ul className="acc-list">
+              {intent.acceptance.map(item => {
+                const done = (edited.acceptanceDone ?? []).includes(item.id)
+                return (
+                  <li key={item.id} className={done ? 'done' : undefined}>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={done}
+                        onChange={() => {
+                          const current = edited.acceptanceDone ?? []
+                          save({ acceptanceDone: done ? current.filter(id => id !== item.id) : [...current, item.id] })
+                        }}
+                      />
+                      <span>{item.value}</span>
+                    </label>
+                    <SourceTag source={item.source} why={item.why} />
+                  </li>
+                )
+              })}
+            </ul>
+          </div>
+
+          <div className="fblock">
+            <div className="fb-head">
+              <span className="k">优先级</span>
+              <SourceTag source={intent.priority.source} why={intent.priority.why} />
+            </div>
+            <span className="prio-row">
+              {(['urgent', 'high', 'medium', 'low'] as const).map(level => (
+                <button
+                  key={level}
+                  type="button"
+                  className={`prio p-${level}${intent.priority.level === level ? ' on' : ''}`}
+                  aria-pressed={intent.priority.level === level}
+                  onClick={() => save({ priority: level === intent.priority.level && edited.priority === level ? undefined : level })}
+                >
+                  {PRIORITY_LABEL[level]}
+                </button>
+              ))}
+            </span>
+          </div>
+
+          <p className="view-note" style={{ marginTop: 10 }}>
+            这四条账本里都没有，是推出来的：<b>「按账本推的」</b>每一句都能在下面「账本原文」里找到出处，
+            <b>「模型归纳」</b>是模型读素材写的、可能不准，<b>「你改的」</b>优先于前两者、模型重跑也盖不掉。
+            {enrichment.saveError !== null ? ` 改动存不下：${enrichment.saveError}` : ''}
+          </p>
+        </>
+      ) : null}
+    </div>
   )
 }
 

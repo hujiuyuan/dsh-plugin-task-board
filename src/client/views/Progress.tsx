@@ -11,6 +11,7 @@
  * 条子拉长之后靠**数字**认差别——每一行右边本来就写着条数和百分比。
  */
 import { useMemo, useRef, useState } from 'react'
+import { expectedRuns, runsIn } from '../derive'
 import { STATUS, STATUS_ORDER } from '../tokens'
 import type { TaskIndex } from '../model'
 import { dayKey, spanEnd } from '../model'
@@ -235,7 +236,10 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
       <div className="panel p-goal">
         <div className="p-goal-hd">
           <h3>本期跑动</h3>
-          <span className="hint view-note">不随上面的日期范围变——它问的是「现在这一期跑了多少」，不是一个区间里的量</span>
+          <span className="hint view-note">
+            不随上面的日期范围变。<b>目标不是谁设的</b>——它由已启用的定时规则算出来：
+            「每天跑一次」就等于这一周该跑 7 次。没排期的、以及一天跑不止一次的，都没有目标，只看实跑。
+          </span>
         </div>
         <div className="pg-wrap">
           <PeriodRow label="本周" range={period.week.range} data={period.week} />
@@ -244,6 +248,11 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
         <div className={`pg-left${period.lastFailed > 0 ? ' warn' : ''}`} title="上一期（上周 / 上月）里失败过的执行数。写周报时要交代的就是这些">
           {period.lastFailed > 0 ? `⚠ 上期有 ${period.lastFailed} 次执行失败` : '上一期没有失败的执行'}
         </div>
+        {period.unschedulable > 0 ? (
+          <div className="pg-note" title="这些排期的 cron 写法比较少见，这个视图认不出来，所以没有把它们算进目标里——宁可少算，也不给一个错的目标">
+            另有 {period.unschedulable} 条排期的 cron 写法认不出来，没算进目标
+          </div>
+        ) : null}
       </div>
 
       <div>
@@ -266,20 +275,42 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
   )
 }
 
-/** 一行「本周 / 本月」。进度条画的是成功占已结束执行的比例。 */
+/**
+ * 一行「本周 / 本月」。
+ *
+ * 进度条画的是**实际跑了多少次占应跑多少次**（有排期时），没有排期就画
+ * 成功占已结算的比例。上面那行字永远同时写出「应跑 / 实跑 / 成功 / 失败」——
+ * 光看条看不出是漏跑了还是跑了没成，这两件事要处理的方式完全不同。
+ */
 function PeriodRow({ label, range, data }: { label: string; range: string; data: PeriodData }) {
-  const pct = data.settled === 0 ? 0 : (data.succeeded / data.settled) * 100
+  const pct = data.expected > 0
+    ? Math.min(100, (data.runs / data.expected) * 100)
+    : data.settled === 0 ? 0 : (data.succeeded / data.settled) * 100
+  const short = data.expected > 0 && data.runs < data.expected
   return (
     <div className="pg">
       <span className="k">{label}</span>
       <span className="rg">{range}</span>
       <span className="nm">
-        <b>{data.runs}</b> 次执行 · 成功 <b>{data.succeeded}</b>
+        {data.expected > 0
+          ? <>应跑 <b>{data.expected}</b> 次 · 实跑 <b className={short ? 'short' : undefined}>{data.runs}</b> 次</>
+          : <><b>{data.runs}</b> 次执行</>}
+        {' · '}成功 <b>{data.succeeded}</b>
         {data.failed > 0 ? <> · 失败 <b>{data.failed}</b></> : null}
+        {data.open > 0 ? <> · 在跑 <b>{data.open}</b></> : null}
       </span>
-      <span className="pg-track" style={{ gridColumn: '1 / -1' }}>
+      <span className={`pg-track${short ? ' warn' : ''}`} style={{ gridColumn: '1 / -1' }}>
         <span className="pg-fill" style={{ width: `${pct}%` }} />
       </span>
+      {data.expected > 0 ? (
+        <span className="pg-sub view-note">
+          {short
+            ? `按已启用的排期，这一期应该跑 ${data.expected} 次，实际少了 ${data.expected - data.runs} 次`
+            : data.runs > data.expected
+              ? `比排期多跑了 ${data.runs - data.expected} 次（手动发的）`
+              : '跟排期对上了'}
+        </span>
+      ) : null}
     </div>
   )
 }
@@ -289,43 +320,60 @@ interface PeriodData {
   succeeded: number
   failed: number
   settled: number
+  open: number
+  /** 按已启用的排期算出来「这一期本该跑几次」。0 = 没有可算的排期。 */
+  expected: number
   range: string
 }
 
-function buildPeriod(tasks: readonly TaskRecord[], now: number): { week: PeriodData; month: PeriodData; lastFailed: number } {
+function buildPeriod(
+  tasks: readonly TaskRecord[],
+  now: number,
+): { week: PeriodData; month: PeriodData; lastFailed: number; unschedulable: number } {
   const weekStart = startOfWeek(now)
   const monthStart = startOfMonth(now)
   const lastWeekStart = weekStart - 7 * DAY_MS
   const lastMonthStart = new Date(new Date(now).getFullYear(), new Date(now).getMonth() - 1, 1).getTime()
 
-  const blank = (range: string): PeriodData => ({ runs: 0, succeeded: 0, failed: 0, settled: 0, range })
+  const blank = (range: string): PeriodData =>
+    ({ runs: 0, succeeded: 0, failed: 0, settled: 0, open: 0, expected: 0, range })
   const week = blank(`${iso(weekStart).slice(5)} ~ ${iso(weekStart + 6 * DAY_MS).slice(5)}`)
   const month = blank(`${new Date(now).getFullYear()} 年 ${new Date(now).getMonth() + 1} 月`)
   let lastFailed = 0
+  let unschedulable = 0
 
-  const tally = (bucket: PeriodData, from: number, to: number, countLast: boolean): void => {
-    for (const task of tasks) {
-      for (const execution of task.executions) {
-        const at = execution.startedAt
-        if (at >= from && at <= to) {
-          bucket.runs += 1
-          if (execution.endedAt !== undefined) {
-            bucket.settled += 1
-            if (execution.result === 'succeeded') bucket.succeeded += 1
-            else if (execution.result === 'failed') bucket.failed += 1
-          }
-        } else if (countLast && at >= lastWeekStart && at < weekStart) {
-          if (execution.result === 'failed') lastFailed += 1
-        } else if (countLast && at >= lastMonthStart && at < monthStart) {
-          if (execution.result === 'failed') lastFailed += 1
+  for (const task of tasks) {
+    const schedule = task.schedule
+    if (schedule !== undefined && schedule.enabled) {
+      // 这一期还没过完，所以只算到「现在」为止 —— 拿整周的目标去比半周的实际，
+      // 每天都显示「还差 4 次」是纯粹的噪音
+      const weekExpect = expectedRuns(schedule.cron, weekStart, now)
+      const monthExpect = expectedRuns(schedule.cron, monthStart, now)
+      if (weekExpect === undefined || monthExpect === undefined) unschedulable += 1
+      else {
+        week.expected += weekExpect
+        month.expected += monthExpect
+      }
+    }
+
+    for (const execution of task.executions) {
+      const at = execution.startedAt
+      for (const [bucket, from, to] of [[week, weekStart, now], [month, monthStart, now]] as const) {
+        if (at < from || at > to) continue
+        bucket.runs += 1
+        if (execution.endedAt === undefined) bucket.open += 1
+        else {
+          bucket.settled += 1
+          if (execution.result === 'succeeded') bucket.succeeded += 1
+          else if (execution.result === 'failed') bucket.failed += 1
         }
       }
+      if (at >= lastWeekStart && at < weekStart && execution.result === 'failed') lastFailed += 1
+      else if (at >= lastMonthStart && at < monthStart && execution.result === 'failed') lastFailed += 1
     }
   }
 
-  tally(week, weekStart, now, true)
-  tally(month, monthStart, now, false)
-  return { week, month, lastFailed }
+  return { week, month, lastFailed, unschedulable }
 }
 
 interface WorkspaceCardProps {
@@ -349,9 +397,18 @@ function WorkspaceCard({ id, tasks, workspaces, now }: WorkspaceCardProps) {
   // 图例上写出来就是错的
   const percents = largestRemainder(STATUS_ORDER.map(status => count[status]), total)
 
-  let weekRuns = 0
+  // 工作区卡底部那行：原型写「本周目标 2/3」。真实数据里没有目标，
+  // 但**有排期** —— 有排期就写「应跑 / 实跑」，没排期就只写实跑。
   const weekStart = startOfWeek(now)
-  for (const task of tasks) for (const execution of task.executions) if (execution.startedAt >= weekStart) weekRuns += 1
+  const weekRuns = runsIn(tasks, weekStart, now)
+  let expected = 0
+  let computable = true
+  for (const task of tasks) {
+    if (task.schedule === undefined || !task.schedule.enabled) continue
+    const want = expectedRuns(task.schedule.cron, weekStart, now)
+    if (want === undefined) computable = false
+    else expected += want
+  }
 
   return (
     <div className="panel p-ws">
@@ -424,10 +481,16 @@ function WorkspaceCard({ id, tasks, workspaces, now }: WorkspaceCardProps) {
         </span>
       </div>
 
-      {/* 原型这里写「本周目标 2/3」。真模型里没有「周期目标」这个概念，
-          换成同一位置、同一形状、也真有的东西：这个工作区本周跑了几次。 */}
-      <div className={`p-ws-goal${weekRuns === 0 ? ' none' : ''}`} title="这个工作区里的任务本周一共执行了几次">
-        {weekRuns === 0 ? '本周没跑过' : <>本周跑过 <b>{weekRuns}</b> 次</>}
+      <div
+        className={`p-ws-goal${weekRuns.runs === 0 && expected === 0 ? ' none' : ''}`}
+        title="这个工作区里的任务本周跑了几次；有已启用排期的话，前面还会写按排期该跑几次"
+      >
+        {expected > 0
+          ? <>本周应跑 <b>{expected}</b> 次 · 实跑 <b>{weekRuns.runs}</b> 次</>
+          : weekRuns.runs === 0
+            ? '本周没跑过'
+            : <>本周跑过 <b>{weekRuns.runs}</b> 次</>}
+        {!computable ? <span className="thin">（有排期认不出来，没算进目标）</span> : null}
       </div>
     </div>
   )

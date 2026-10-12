@@ -6,6 +6,7 @@
  * 肉眼看得出来。
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import type { Field, FieldSource } from '../derive'
 import { hueOf } from '../tokens'
 
 export interface Option {
@@ -198,6 +199,101 @@ export function emptyTaskCopy(kind: 'board' | 'ledger' | 'unavailable'): { title
   return kind === 'board'
     ? { title: '还没有任务', body: '在任务看板里建一张卡，这里就有了。' }
     : { title: '账本里一条任务都没有', body: '这个视图读的是账本快照本身；账本是空的，就没有可画的。' }
+}
+
+/**
+ * 「这个值是从哪来的」。
+ *
+ * 这一小块是整个推导层能不能被信任的关键：同一个位置上，一句从账本算出来的话
+ * 和一句模型编出来的话，用户必须**一眼**分得清。分不清的话，他要么全信
+ * （于是被模型带偏），要么全不信（于是这个功能白做）。
+ */
+export function SourceTag({ source, why }: { source: FieldSource; why: string }) {
+  const meta: Record<FieldSource, { text: string; cls: string }> = {
+    raw: { text: '账本原文', cls: 'tag-raw' },
+    derived: { text: '按账本推的', cls: 'tag-derived' },
+    ai: { text: '模型归纳', cls: 'tag-ai' },
+    edited: { text: '你改的', cls: 'tag-edited' },
+  }
+  const item = meta[source]
+  return (
+    <span className={`src-tag ${item.cls}`} title={why}>
+      {item.text}
+    </span>
+  )
+}
+
+/**
+ * 一条「标签 + 值 + 出处」。
+ *
+ * 双形态：平时是只读的一段话，点「改」变成 textarea，存下去就成了 `edited`，
+ * 从此模型再也盖不掉它。**改不了的值不值得显示** —— 用户看着一个模型写的、
+ * 明显不对的「目标」，唯一能做的就是不再打开这个页面。
+ */
+export function FieldBlock({
+  label,
+  field,
+  hint,
+  onSave,
+}: {
+  label: string
+  field: Field
+  hint?: string
+  onSave?: (next: string) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(field.value)
+
+  // 外部换了值（模型重跑完、或者换了任务）时把草稿跟上——不然点开编辑框
+  // 看到的是上一张卡的原文
+  useEffect(() => {
+    if (!editing) setDraft(field.value)
+  }, [field.value, editing])
+
+  const commit = (): void => {
+    setEditing(false)
+    if (draft.trim() !== field.value.trim()) onSave?.(draft.trim())
+  }
+
+  return (
+    <div className="fblock">
+      <div className="fb-head">
+        <span className="k">{label}</span>
+        <SourceTag source={field.source} why={field.why} />
+        {hint !== undefined ? <span className="fb-hint">{hint}</span> : null}
+        {onSave !== undefined && !editing ? (
+          <button type="button" className="fb-edit" onClick={() => setEditing(true)}>改</button>
+        ) : null}
+      </div>
+      {editing ? (
+        <div className="fb-edit-area">
+          <textarea
+            value={draft}
+            autoFocus
+            rows={Math.min(6, Math.max(2, Math.ceil(draft.length / 48)))}
+            onChange={event => setDraft(event.target.value)}
+            onKeyDown={event => {
+              if (event.key === 'Escape') { setDraft(field.value); setEditing(false) }
+              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) commit()
+            }}
+          />
+          <div className="fb-actions">
+            <button type="button" className="btn btn-secondary" onClick={() => { setDraft(field.value); setEditing(false) }}>取消</button>
+            <button type="button" className="btn btn-primary" onClick={commit}>存下</button>
+            {field.source === 'edited' ? (
+              <button type="button" className="btn btn-secondary" onClick={() => { setDraft(''); onSave?.('') }}>
+                恢复成推的
+              </button>
+            ) : null}
+          </div>
+        </div>
+      ) : field.missing === true && field.value.length === 0 ? (
+        <p className="fb-missing">账本里没有能推的素材。{onSave !== undefined ? '可以直接写一条。' : ''}</p>
+      ) : (
+        <p className={`fb-value${field.missing === true ? ' thin' : ''}`}>{field.value}</p>
+      )}
+    </div>
+  )
 }
 
 /** 空态。看板 / 甘特 / 进度共用同一套文案规则。 */

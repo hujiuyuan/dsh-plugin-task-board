@@ -10,6 +10,7 @@
  *     不分组的话两个月以后要滚屏半小时才看得到今天的。
  */
 import { useEffect, useMemo, useState } from 'react'
+import { deriveIntent, manualSettled, periodOf, priorityOf, ruleRank } from '../derive'
 import { STATUS, STATUS_ORDER, barColor, hueOf } from '../tokens'
 import type { TaskIndex } from '../model'
 import { dayKey, groupByDay, lastExecution, paginateByWorkday, rollupOf, shortTime, spanEnd, triggerOf } from '../model'
@@ -75,10 +76,12 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
     for (const task of index.roots) out[task.status].push(task)
     for (const status of STATUS_ORDER) {
       // 结束了的按「结算时间」倒序 —— 跟卡片第四行写出来、跟分组用的都是同一个时刻，
-      // 三者不一致的话列表顺序看起来就是随机的
+      // 三者不一致的话列表顺序看起来就是随机的。
+      // 没结束的三列：**先按优先级，再按创建时间倒序**（原型是「有目标的在前」，
+      // 这里换成一条真能从账本算出来的：快炸的、正在跑的、会自己动的排前面）。
       out[status].sort(status === 'done' || status === 'failed'
         ? (a, b) => spanEnd(b, now) - spanEnd(a, now)
-        : (a, b) => b.createdAt - a.createdAt)
+        : (a, b) => ruleRank(b) - ruleRank(a) || b.createdAt - a.createdAt)
     }
     return out
   }, [index.roots, now])
@@ -327,6 +330,12 @@ function Card({ task, index, now, workspaces, selectedId, onSelect }: CardProps)
   const wsName = workspaces.nameOf(task.workspaceId)
   const unpinned = task.workspaceId === undefined || task.workspaceId.length === 0
 
+  // 这三个都只看账本字段，不看模型 —— 卡片上不能出现「等模型回来才显示」的格子。
+  const priority = useMemo(() => priorityOf(task), [task])
+  const period = useMemo(() => periodOf(task), [task])
+  const manual = useMemo(() => manualSettled(task), [task])
+  const goal = useMemo(() => { const i = deriveIntent(task, now); return i.goal }, [task, now])
+
   // 第四行左边那一格：按状态换口径。一个跑着的任务写「创建时间」没有意义，
   // 一个跑完的任务写「开始时间」也不如「结算」有用。
   const when = running
@@ -364,20 +373,26 @@ function Card({ task, index, now, workspaces, selectedId, onSelect }: CardProps)
       </span>
 
       <h4>
+        {/* 缺目标：执行提示和说明都空着 —— 这种卡跑起来会拿到一个空的 prompt。
+            原型里是个小黄点，这里照做，提示词写清为什么。 */}
+        {goal.value === '' ? (
+          <span className="nogol" title="这张卡没有填执行提示，也没有说明 —— 跑起来发给 DSH 的是空的" aria-label="缺目标" />
+        ) : null}
         <span className="ttl">{task.title}</span>
       </h4>
 
       <div className="card-tags">
-        {task.schedule !== undefined ? (
-          <span
-            className="badge-period"
-            title={`定时${task.schedule.enabled ? '已启用' : '未启用'} · ${task.schedule.cron}`}
-          >
-            {task.schedule.enabled ? '定时' : '定时已关'}
-          </span>
+        <span className={`prio p-${priority.level}`} title={`优先级：${priority.value} · ${priority.why}`}>
+          {priority.value}
+        </span>
+        {period !== undefined ? (
+          <span className="badge-period" title={`${period.label} · ${period.why}`}>{period.label}</span>
         ) : null}
-        {task.teamRun === true ? <span className="badge-period" title="这一整个子树按 Agent Team 跑">团队</span> : null}
-        {task.goalRun === false ? <span className="badge-period" title="只跑一轮，不启 /goal">单轮</span> : null}
+        {manual !== undefined ? (
+          <span className="badge-manual" title={manual}>手动结算</span>
+        ) : null}
+        {task.teamRun === true ? <span className="badge-plain" title="这一整个子树按 Agent Team 跑">团队</span> : null}
+        {task.goalRun === false ? <span className="badge-plain" title="只跑一轮，不启 /goal">单轮</span> : null}
         {tags.map(tag => (
           <span
             key={tag.name}

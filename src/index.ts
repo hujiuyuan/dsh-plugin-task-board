@@ -17,9 +17,20 @@
  *   2. **schemaVersion 不符就明说**。账本是别人插件的私有文件，格式随对方版本漂移；
  *      版本对不上时返回 `degraded` 而不是硬猜字段——猜错出来的图比空白更糟。
  */
-import { readFile } from 'node:fs/promises'
-import { join, resolve as pathResolve } from 'node:path'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { dirname, join, resolve as pathResolve } from 'node:path'
 import { homedir } from 'node:os'
+import {
+  ENRICH_TIMEOUT_MS,
+  EnrichError,
+  enrichOnce,
+  renderMaterial,
+  splitRoute,
+  type AiIntent,
+  type LlmFace,
+  type Material,
+} from './enrich'
 
 declare const __PLUGIN_VERSION__: string
 const PLUGIN_VERSION = typeof __PLUGIN_VERSION__ === 'undefined' ? 'dev' : __PLUGIN_VERSION__
@@ -40,6 +51,14 @@ interface WebServerRoute {
 interface HostContext {
   webServer?: { register(route: WebServerRoute): () => void }
   logger?: { warn(message: string): void }
+  /** 宿主注入的模型服务。装没装、什么时候到，都不是我们说得了算的。 */
+  llm?: LlmFace
+  /**
+   * cordis 的「等某个服务出现再跑这段」。用它注册模型那条路由，是为了
+   * **llm 不在场时其余路由照常工作** —— 没有模型只是少一个功能，不是整个插件坏掉。
+   */
+  inject?: (names: string[], callback: (scope: HostContext) => void) => void
+  get?: (name: string) => unknown
 }
 
 export const name = 'dsh-plugin-task-board'
@@ -53,6 +72,89 @@ const LEDGER_RELATIVE_PATH = join('task-board', 'ledger-v2.json')
 
 export const HEALTH_PATH = '/api/dsh-plugin-task-board/health'
 export const LEDGER_PATH = '/api/dsh-plugin-task-board/ledger'
+export const ENRICH_PATH = '/api/dsh-plugin-task-board/enrich'
+export const OVERRIDES_PATH = '/api/dsh-plugin-task-board/overrides'
+
+/**
+ * 插件自己的目录名，在 `$DSH_HOME` 下面。
+ * 跟看板那个 `task-board/` 并列，**不往里塞任何东西**——那是人家的目录。
+ */
+const OWN_DIR = 'dsh-plugin-task-board'
+const OVERRIDES_FILE = 'enrichment.json'
+const OVERRIDES_SCHEMA = 1
+
+/**
+ * 归纳结果的缓存和人工改动，存在**插件自己的文件**里。
+ *
+ * 为什么不写回账本的 `integrations`：写账本要走看板的写入契约，而这个包是
+ * 纯只读的（见文件头那两条边界）。只读的插件偷偷改人家的账本，是那种
+ * 出问题之后完全说不清的事。等真要做写入路径了再迁过去。
+ */
+interface OverrideEntry {
+  goal?: string
+  scenario?: string
+  background?: string
+  acceptanceDone?: string[]
+  priority?: 'urgent' | 'high' | 'medium' | 'low'
+}
+
+interface Store {
+  schemaVersion: number
+  /** taskId → { 指纹, 模型给的, 什么时候给的, 用的哪个模型 } */
+  cache: Record<string, { fingerprint: string; ai: AiIntent; at: number; model: string }>
+  /** taskId → 人改过的。人改的永远压过模型。 */
+  overrides: Record<string, OverrideEntry>
+}
+
+const emptyStore = (): Store => ({ schemaVersion: OVERRIDES_SCHEMA, cache: {}, overrides: {} })
+
+async function readStore(path: string): Promise<Store> {
+  let text: string
+  try {
+    text = await readFile(path, 'utf8')
+  } catch {
+    return emptyStore()
+  }
+  try {
+    const parsed = JSON.parse(text) as Partial<Store>
+    if (parsed.schemaVersion !== OVERRIDES_SCHEMA) return emptyStore()
+    return {
+      schemaVersion: OVERRIDES_SCHEMA,
+      cache: typeof parsed.cache === 'object' && parsed.cache !== null ? parsed.cache : {},
+      overrides: typeof parsed.overrides === 'object' && parsed.overrides !== null ? parsed.overrides : {},
+    }
+  } catch {
+    // 文件坏了就当没有——这是缓存加一点人工输入，丢了能重建，不值得因此报错
+    return emptyStore()
+  }
+}
+
+async function writeStore(path: string, store: Store): Promise<void> {
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, `${JSON.stringify(store, null, 2)}\n`, 'utf8')
+}
+
+/**
+ * 素材指纹。**任务变了才重新问模型** —— 模型的调用是要花钱的，
+ * 同一张卡每打开一次抽屉就问一遍，用户很快就再也不会点那个按钮了。
+ */
+function fingerprintOf(material: Material, model: string): string {
+  return createHash('sha256').update(`${model}\u0000${renderMaterial(material)}`).digest('hex').slice(0, 16)
+}
+
+/** 收集一个 POST 请求的正文，带长度上限。 */
+async function readBody(req: any): Promise<string> {
+  const limit = 1 << 20
+  let size = 0
+  const chunks: Buffer[] = []
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    size += buffer.length
+    if (size > limit) throw new Error(`请求体超过 ${limit} 字节`)
+    chunks.push(buffer)
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
 
 /**
  * DSH 数据根目录。优先用官方 `@deepseek-ai/dsh-home-paths`，拿不到就按同一套规则自己算：
@@ -150,4 +252,177 @@ export function apply(ctx: HostContext): void {
       })
     },
   })
+
+  const where = (): string => join(dshHome(), OWN_DIR, OVERRIDES_FILE)
+
+  // 人工改动那两条路由**不需要模型**，所以注册在最外层：没装模型也能改、能存。
+  webServer.register({
+    kind: 'exact',
+    path: OVERRIDES_PATH,
+    handler: async (req: any, res: any) => {
+      const path = where()
+      if (req?.method !== 'POST') {
+        const store = await readStore(path)
+        json(res, 200, { ok: true, overrides: store.overrides, path })
+        return
+      }
+      try {
+        const body = JSON.parse(await readBody(req)) as { taskId?: unknown; override?: unknown }
+        if (typeof body.taskId !== 'string' || body.taskId.length === 0) {
+          json(res, 200, { ok: false, reason: 'bad-request', detail: 'taskId 是必填的' })
+          return
+        }
+        const store = await readStore(path)
+        const next = sanitizeOverride(body.override)
+        if (Object.keys(next).length === 0) delete store.overrides[body.taskId]
+        else store.overrides[body.taskId] = next
+        await writeStore(path, store)
+        json(res, 200, { ok: true, path })
+      } catch (error) {
+        json(res, 200, { ok: false, reason: 'write-failed', detail: String(error) })
+      }
+    },
+  })
+
+  /**
+   * 归纳那条路由要模型，所以挂在 `ctx.inject(['llm'], ...)` 里面。
+   *
+   * 这么挂的用意是**降级而不是失败**：这个部署没有 llm 服务时，这一段整个不跑，
+   * 但账本和人工改动那几条路由照常在。用户看到的是「AI 补全这个按钮不能用」，
+   * 不是「整个插件坏了」。
+   */
+  const registerEnrich = (scope: HostContext): void => {
+    scope.webServer?.register({
+      kind: 'exact',
+      path: ENRICH_PATH,
+      handler: async (req: any, res: any) => {
+        const path = where()
+        if (req?.method !== 'POST') {
+          json(res, 200, { ok: false, reason: 'bad-request', detail: '这条路由只接 POST' })
+          return
+        }
+
+        let body: { tasks?: unknown; model?: unknown; force?: unknown }
+        try {
+          body = JSON.parse(await readBody(req))
+        } catch (error) {
+          json(res, 200, { ok: false, reason: 'bad-request', detail: String(error) })
+          return
+        }
+
+        const materials = Array.isArray(body.tasks) ? body.tasks.filter(isMaterialLike) : []
+        if (materials.length === 0) {
+          json(res, 200, { ok: false, reason: 'bad-request', detail: '没有可归纳的任务' })
+          return
+        }
+        if (materials.length > 20) {
+          json(res, 200, { ok: false, reason: 'bad-request', detail: '一次最多归纳 20 个任务' })
+          return
+        }
+
+        const llm = scope.llm ?? (scope.get?.('llm') as LlmFace | undefined)
+        if (llm === undefined || typeof llm.stream !== 'function') {
+          json(res, 200, { ok: false, reason: 'no-model', detail: '这个部署没有提供模型服务（llm）' })
+          return
+        }
+
+        const model = typeof body.model === 'string' ? body.model : ''
+        const route = splitRoute(model)
+        if (route === undefined) {
+          json(res, 200, {
+            ok: false,
+            reason: 'no-model',
+            detail: '没给模型路由。这个任务没有绑模型，先去任务看板给它选一个，或者在看板设置里挑一个默认模型。',
+          })
+          return
+        }
+
+        const store = await readStore(path)
+        const force = body.force === true
+        const results: Record<string, { ai: AiIntent; cached: boolean; at?: number }> = {}
+        let changed = false
+        // 第一个出错的原因。全部任务都失败时把它带回去当整体结论——
+        // 只说「失败了」而不说为什么，用户没有任何办法自己解决。
+        let firstError: EnrichError | undefined
+
+        for (const material of materials) {
+          const fingerprint = fingerprintOf(material, model)
+          const hit = store.cache[material.id]
+          if (!force && hit !== undefined && hit.fingerprint === fingerprint) {
+            results[material.id] = { ai: hit.ai, cached: true, at: hit.at }
+            continue
+          }
+          try {
+            const ai = await enrichOnce(llm, route, renderMaterial(material), undefined)
+            store.cache[material.id] = { fingerprint, ai, at: Date.now(), model }
+            changed = true
+            results[material.id] = { ai, cached: false }
+          } catch (error) {
+            // 一个任务失败不该拖垮另外几个。这里记下原因、继续下一个，
+            // 全部失败时下面再把第一个原因带回去当整体结论。
+            if (error instanceof EnrichError) {
+              results[material.id] = { ai: {}, cached: false }
+              if (firstError === undefined) firstError = error
+            } else throw error
+          }
+        }
+
+        if (changed) {
+          try {
+            await writeStore(path, store)
+          } catch {
+            // 存不下只是下次还得再问一遍模型，不该把这一轮的结果丢掉
+          }
+        }
+
+        const usable = Object.values(results).some(entry => Object.keys(entry.ai).length > 0)
+        if (!usable && firstError !== undefined) {
+          json(res, 200, {
+            ok: false,
+            reason: firstError.reason,
+            detail: firstError.message,
+            timeoutMs: ENRICH_TIMEOUT_MS,
+          })
+          return
+        }
+        json(res, 200, { ok: true, model, results, path })
+      },
+    })
+  }
+
+  if (typeof ctx.inject === 'function') ctx.inject(['llm'], registerEnrich)
+  else registerEnrich(ctx)
+}
+
+/** 只收我们认得的形状。模型的入参来自浏览器，是外部输入。 */
+function isMaterialLike(value: unknown): value is Material {
+  if (typeof value !== 'object' || value === null) return false
+  const m = value as Record<string, unknown>
+  return typeof m.id === 'string' && typeof m.title === 'string'
+}
+
+/**
+ * 人工改的那份也要过一遍。浏览器发上来的东西**不能直接落盘** ——
+ * 这份文件下次会被原样读回来，写进去一个几兆的字符串就是自己给自己下毒。
+ */
+function sanitizeOverride(value: unknown): OverrideEntry {
+  if (typeof value !== 'object' || value === null) return {}
+  const raw = value as Record<string, unknown>
+  const out: OverrideEntry = {}
+  const text = (input: unknown, limit: number): string | undefined =>
+    typeof input === 'string' && input.trim().length > 0 ? input.trim().slice(0, limit) : undefined
+
+  const goal = text(raw.goal, 400)
+  if (goal !== undefined) out.goal = goal
+  const scenario = text(raw.scenario, 400)
+  if (scenario !== undefined) out.scenario = scenario
+  const background = text(raw.background, 1000)
+  if (background !== undefined) out.background = background
+  if (Array.isArray(raw.acceptanceDone)) {
+    out.acceptanceDone = raw.acceptanceDone.filter((id): id is string => typeof id === 'string').slice(0, 20)
+  }
+  if (raw.priority === 'urgent' || raw.priority === 'high' || raw.priority === 'medium' || raw.priority === 'low') {
+    out.priority = raw.priority
+  }
+  return out
 }

@@ -237,6 +237,76 @@ const TAIL = `
   white-space:pre-wrap;word-break:break-word;max-height:280px;overflow:auto;
   font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 }
+
+/* ── 推导出来的字段（原型里是写死的样例，这里是算出来的） ────────────────
+   这一节的每一块都在回答同一个问题：**这个值凭什么能信**。 */
+
+/* 「这个值是从哪来的」。四色分得很开是故意的：用户扫一眼就得知道
+   哪句话是从他自己写的东西里来的、哪句是模型编的。 */
+.dsptb .src-tag{
+  flex:0 0 auto;font-size:10px;line-height:1;padding:2px 5px;border-radius:4px;
+  border:1px solid transparent;white-space:nowrap;
+}
+.dsptb .src-tag.tag-raw{color:var(--label-secondary);border-color:var(--border-l3)}
+.dsptb .src-tag.tag-derived{color:var(--state-success);border-color:var(--state-success)}
+.dsptb .src-tag.tag-ai{color:var(--business-primary);border-color:var(--business-primary)}
+.dsptb .src-tag.tag-edited{color:var(--state-warn);border-color:var(--warn-border);background:var(--warn-bg)}
+
+.dsptb .fblock{padding:10px 0;border-bottom:1px solid var(--border-l1)}
+.dsptb .fblock:last-child{border-bottom:0}
+.dsptb .fb-head{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+.dsptb .fb-head .k{font-size:11px;font-weight:700;color:var(--label-secondary);letter-spacing:.03em}
+.dsptb .fb-hint{font-size:11px;color:var(--label-tertiary);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsptb .fb-edit{
+  margin-left:auto;font-size:11px;color:var(--label-secondary);background:none;border:0;
+  cursor:pointer;padding:2px 4px;border-radius:4px;
+}
+.dsptb .fb-edit:hover{color:var(--label-primary);background:var(--interactive-bg-hover)}
+.dsptb .fb-value{margin:0;font-size:14px;line-height:1.6}
+.dsptb .fb-value.thin{color:var(--label-secondary)}
+.dsptb .fb-missing{margin:0;font-size:12px;color:var(--label-tertiary);font-style:italic}
+.dsptb .fb-error{
+  margin:0 0 10px;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.6;
+  color:var(--warn-fg);background:var(--warn-bg);border:1px solid var(--warn-border);
+}
+.dsptb .fb-error .thin{color:var(--label-secondary)}
+.dsptb .fb-edit-area{display:flex;flex-direction:column;gap:8px}
+.dsptb .fb-edit-area textarea{
+  width:100%;box-sizing:border-box;padding:8px 10px;border-radius:8px;resize:vertical;
+  background:var(--input-major);border:1px solid var(--border-l2);color:var(--label-primary);
+  font:inherit;font-size:13px;line-height:1.6;
+}
+.dsptb .fb-edit-area textarea:focus{outline:none;border-color:var(--brand)}
+.dsptb .fb-actions{display:flex;gap:8px}
+
+/* 验收清单：可勾。勾的是人的判断，条目本身是账本里的事实，两者分开标。 */
+.dsptb .acc-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.dsptb .acc-list li{display:flex;align-items:flex-start;gap:8px;font-size:13px;line-height:1.6}
+.dsptb .acc-list li label{display:flex;align-items:flex-start;gap:7px;cursor:pointer;min-width:0}
+.dsptb .acc-list li input{margin:4px 0 0;flex:0 0 auto;accent-color:var(--brand)}
+.dsptb .acc-list li.done span:not(.src-tag){color:var(--label-tertiary);text-decoration:line-through}
+.dsptb .acc-list li .src-tag{margin-top:3px}
+
+/* 优先级四档。中/低两档原型没有（它的样例只有高和紧急），按同一套语言补的。 */
+.dsptb .prio.p-medium{color:var(--business-primary);background:hsl(221 98% 67% / .14)}
+.dsptb .prio.p-low{color:var(--label-tertiary);background:var(--bg-layer-3)}
+.dsptb .prio-row{display:inline-flex;gap:6px}
+.dsptb .prio-row .prio{cursor:pointer;border:1px solid transparent;opacity:.55}
+.dsptb .prio-row .prio:hover{opacity:.85}
+.dsptb .prio-row .prio.on{opacity:1;border-color:currentColor}
+
+/* 卡片上「团队 / 单轮」这类中性小标 —— 不是优先级也不是周期，别用它们那套颜色。 */
+.dsptb .badge-plain{
+  font-size:11px;line-height:1;padding:3px 6px;border-radius:5px;
+  color:var(--label-secondary);background:var(--bg-layer-3);border:1px solid var(--border-l1);
+}
+
+/* 周期目标那条进度轨：实际跑得比应跑少时整条变琥珀，一眼看得见。 */
+.dsptb .pg-track.warn .pg-fill{background:var(--state-warn)}
+.dsptb .nm b.short{color:var(--state-warn)}
+.dsptb .pg-sub{grid-column:1 / -1;color:var(--label-tertiary)}
+.dsptb .pg-note{margin-top:6px;font-size:11px;color:var(--label-tertiary)}
+.dsptb .thin{color:var(--label-tertiary);font-weight:400}
 `
 
 /**

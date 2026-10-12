@@ -9,6 +9,8 @@
  * 是不能接受的。宿主提供 `ctx.layout.selectPanel(null)` 就是「回到会话」本身。
  */
 import { useEffect, useMemo, useState } from 'react'
+import { deriveIntent } from '../derive'
+import { useEnrichment } from '../enrich'
 import { buildIndex } from '../model'
 import type { TaskRecord } from '../types'
 import type { TaskSource } from '../data'
@@ -55,7 +57,30 @@ export function Panel({ ctx, source }: PanelProps) {
   )
   const workspaces = useWorkspaces(ctx, workspaceIds)
 
+  const enrichment = useEnrichment(ctx)
+
   const selected = selectedId === undefined ? undefined : index.byId.get(selectedId)
+
+  /**
+   * 当前选中的那张卡的四条意图字段。
+   * 三个来源在这里汇合：规则推导（永远在）→ 模型归纳 → 人改过的。
+   */
+  const intent = useMemo(
+    () => (selected === undefined
+      ? undefined
+      : deriveIntent(selected, now, enrichment.ai[selected.id], enrichment.overrides[selected.id])),
+    [selected, now, enrichment.ai, enrichment.overrides],
+  )
+
+  // 打开一张卡时自动归纳一次（只在有模型路由、且这张卡一条都没有的时候）。
+  // 依赖里只放 id：`enrichment.auto` 每次渲染都是新函数，放进来会无限循环。
+  const selectedTaskId = selected?.id
+  const autoEnrich = enrichment.auto
+  useEffect(() => {
+    if (selected === undefined) return
+    autoEnrich([selected])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTaskId])
 
   const backToConversation = (): void => {
     try {
@@ -170,7 +195,7 @@ export function Panel({ ctx, source }: PanelProps) {
         </section>
       </div>
 
-      {selected !== undefined ? (
+      {selected !== undefined && intent !== undefined ? (
         <Drawer
           // 换任务就重挂：标签页回到第一格，不会停在上一个任务才有的那一页上
           key={selected.id}
@@ -181,6 +206,8 @@ export function Panel({ ctx, source }: PanelProps) {
           onClose={() => setSelectedId(undefined)}
           onNavigate={task => setSelectedId(task.id)}
           onOpenSession={openSession}
+          intent={intent}
+          enrichment={enrichment}
         />
       ) : null}
     </div>
