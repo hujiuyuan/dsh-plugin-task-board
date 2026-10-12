@@ -1,13 +1,18 @@
 /**
- * 这个插件的主页面：顶栏 + 三个视图 + 抽屉。
+ * 这个插件的主页面：顶栏 + 降级横幅 + 三个视图 + 抽屉。
  *
- * 顶栏上从左到右是：标题、视图切换、筛选框、**数据来源指示灯**。最后一个不是装饰——
- * 这个插件有两种数据来源，一种实时一种不实时，分不清的话用户会以为看板坏了。
+ * 顶栏从左到右：**返回会话**、标题、数据来源徽标；右边是视图切换。
+ * 「去哪（视图）」是页面级动作所以放顶栏，「看什么（筛选）」下放到每一列的列头 ——
+ * 这跟原型的分工一致。
+ *
+ * 返回会话那个按钮是**必须的**：这个面板占了中间那一栏，没有一条明确的回头路
+ * 是不能接受的。宿主提供 `ctx.layout.selectPanel(null)` 就是「回到会话」本身。
  */
 import { useEffect, useMemo, useState } from 'react'
 import { buildIndex } from '../model'
 import type { TaskRecord } from '../types'
 import type { TaskSource } from '../data'
+import { useWorkspaces } from '../workspaces'
 import { Board } from './Board'
 import { Drawer } from './Drawer'
 import { Gantt } from './Gantt'
@@ -15,10 +20,10 @@ import { Progress } from './Progress'
 
 type View = 'board' | 'gantt' | 'progress'
 
-const VIEWS: ReadonlyArray<{ id: View; label: string; hint: string }> = [
-  { id: 'board', label: '看板', hint: '按状态分五列，一张卡一个任务' },
-  { id: 'gantt', label: '甘特', hint: '最近 21 天，谁跑了、跑了多久' },
-  { id: 'progress', label: '进度', hint: '整体什么状态、有没有东西卡住' },
+const VIEWS: ReadonlyArray<{ id: View; label: string }> = [
+  { id: 'board', label: '看板' },
+  { id: 'gantt', label: '甘特' },
+  { id: 'progress', label: '进度' },
 ]
 
 /** 「正在跑」那几个字要自己会动，不然看不出还在跑。 */
@@ -31,9 +36,12 @@ interface PanelProps {
 
 export function Panel({ ctx, source }: PanelProps) {
   const [view, setView] = useState<View>('board')
-  const [query, setQuery] = useState('')
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined)
   const [now, setNow] = useState(() => Date.now())
+  const [hideSubtasks, setHideSubtasks] = useState(false)
+  const [lanes, setLanes] = useState(false)
+  /** 甘特/进度自己的筛选被「清空全部」清掉时，靠这个数把它们重置。 */
+  const [resetToken, setResetToken] = useState(0)
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), TICK_MS)
@@ -41,29 +49,38 @@ export function Panel({ ctx, source }: PanelProps) {
   }, [])
 
   const index = useMemo(() => buildIndex(source.snapshot.tasks), [source.snapshot.tasks])
+  const workspaceIds = useMemo(
+    () => [...new Set(index.onBoard.map(task => task.workspaceId ?? ''))],
+    [index.onBoard],
+  )
+  const workspaces = useWorkspaces(ctx, workspaceIds)
 
-  // 选中的任务可能在下一次刷新里没了（被删、被归档）。索引里找得到才开抽屉——
-  // 找不到就自然关掉，比留一个指向空气的抽屉好。
   const selected = selectedId === undefined ? undefined : index.byId.get(selectedId)
 
-  /**
-   * 回会话页。
-   *
-   * **这个按钮是必须的，不是锦上添花。** 这个面板占了中间那一栏，
-   * 用户进来之后如果没有一条明确的回头路，就只能靠侧边栏——而侧边栏那一行
-   * 在窄窗口里可能被折起来。宿主提供 `ctx.layout.selectPanel(null)`
-   * 就是「回到会话」这个动作本身。
-   */
   const backToConversation = (): void => {
     try {
       ctx.get('layout')?.selectPanel?.(null)
     } catch {
-      // layout 不在场（换了外壳组合）时不做任何事，也不报错
+      // layout 不在场（换了外壳组合）时什么都不做，也不报错
     }
   }
 
+  /**
+   * 跳到任务看板那个面板。面板 id 是任务看板自己定死的（`TASK_BOARD_PANEL_ID`），
+   * 不是我们说了算 —— 所以它没装、或者宿主没给 layout 时，这个动作就不该出现。
+   */
+  const openBoard = source.snapshot.kind === 'board' && ctx.get('layout')?.selectPanel !== undefined
+    ? (): void => {
+        try {
+          ctx.get('layout').selectPanel('task-board')
+        } catch {
+          // 面板 id 对不上时宿主自己会忽略，这里不重复报错
+        }
+      }
+    : undefined
+
   const openSession = (sessionId: string): boolean => {
-    for (const name of ['uiWorkspace', 'workspaceNavigation']) {
+    for (const name of ['uiWorkspace']) {
       try {
         const face = ctx.get(name)
         if (face !== undefined && typeof face.openSession === 'function') {
@@ -71,72 +88,96 @@ export function Panel({ ctx, source }: PanelProps) {
           return true
         }
       } catch {
-        // 服务不在场，试下一个
+        // 服务不在场
       }
     }
     return false
   }
 
-  const isEmpty = index.all.length === 0
+  const clearAll = (): void => {
+    setHideSubtasks(false)
+    setResetToken(token => token + 1)
+  }
 
   return (
     <div className="dsptb">
-      <div className="dsptb-bar">
-        <button type="button" className="dsptb-btn" onClick={backToConversation} title="回到会话页">
-          ← 返回会话
+      <header className="panel-head">
+        <button type="button" className="icon-btn" onClick={backToConversation} title="回到会话页" aria-label="返回会话">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M9.5 3.5 5 8l4.5 4.5" />
+          </svg>
         </button>
-        <span className="dsptb-title">规划视图</span>
-        <div className="dsptb-seg" role="group" aria-label="切换视图">
+        <h1>规划视图</h1>
+        <SourceBadge source={source} />
+        <span className="spacer" />
+        <div className="seg seg-view" role="group" aria-label="切换视图">
           {VIEWS.map(item => (
-            <button
-              key={item.id}
-              type="button"
-              title={item.hint}
-              aria-pressed={view === item.id}
-              onClick={() => setView(item.id)}
-            >
+            <button key={item.id} type="button" aria-pressed={view === item.id} onClick={() => setView(item.id)}>
               {item.label}
             </button>
           ))}
         </div>
-        {view === 'board' ? (
-          <input
-            className="dsptb-input"
-            style={{ flex: '0 1 220px' }}
-            placeholder="筛选任务…"
-            value={query}
-            onChange={event => setQuery(event.target.value)}
-            aria-label="筛选任务"
-          />
-        ) : null}
-        <span className="dsptb-bar-grow" />
-        <SourceStatus source={source} />
-      </div>
+      </header>
 
-      <div className="dsptb-body">
-        {isEmpty ? <Blank source={source} ctx={ctx} /> : null}
-        {!isEmpty && view === 'board' ? (
-          <Board
-            index={index}
-            now={now}
-            query={query}
-            selectedId={selectedId}
-            onSelect={task => setSelectedId(task.id)}
-          />
-        ) : null}
-        {!isEmpty && view === 'gantt' ? (
-          <Gantt index={index} now={now} selectedId={selectedId} onSelect={task => setSelectedId(task.id)} />
-        ) : null}
-        {!isEmpty && view === 'progress' ? (
-          <Progress index={index} now={now} onSelect={task => setSelectedId(task.id)} />
-        ) : null}
+      <div className="page">
+        <Banner source={source} />
+
+        <section className="view" aria-label="看板视图" hidden={view !== 'board'}>
+          {view === 'board' ? (
+            <Board
+              index={index}
+              now={now}
+              workspaces={workspaces}
+              selectedId={selectedId}
+              onSelect={task => setSelectedId(task.id)}
+              onClearAll={clearAll}
+              sourceKind={source.snapshot.kind}
+              onOpenBoard={openBoard}
+            />
+          ) : null}
+        </section>
+
+        <section className="view" aria-label="甘特视图" hidden={view !== 'gantt'}>
+          {view === 'gantt' ? (
+            <Gantt
+              key={`gantt-${resetToken}`}
+              index={index}
+              now={now}
+              workspaces={workspaces}
+              selectedId={selectedId}
+              onSelect={task => setSelectedId(task.id)}
+              onClearAll={clearAll}
+              hideSubtasks={hideSubtasks}
+              onHideSubtasks={setHideSubtasks}
+              lanes={lanes}
+              onLanes={setLanes}
+              sourceKind={source.snapshot.kind}
+            />
+          ) : null}
+        </section>
+
+        <section className="view" aria-label="进度视图" hidden={view !== 'progress'}>
+          {view === 'progress' ? (
+            <Progress
+              key={`progress-${resetToken}`}
+              index={index}
+              now={now}
+              workspaces={workspaces}
+              onSelect={task => setSelectedId(task.id)}
+              sourceKind={source.snapshot.kind}
+            />
+          ) : null}
+        </section>
       </div>
 
       {selected !== undefined ? (
         <Drawer
+          // 换任务就重挂：标签页回到第一格，不会停在上一个任务才有的那一页上
+          key={selected.id}
           task={selected}
           index={index}
           now={now}
+          workspaces={workspaces}
           onClose={() => setSelectedId(undefined)}
           onNavigate={task => setSelectedId(task.id)}
           onOpenSession={openSession}
@@ -146,83 +187,81 @@ export function Panel({ ctx, source }: PanelProps) {
   )
 }
 
-/** 顶栏右端那颗灯：数据从哪来、是不是实时的、要不要手动刷。 */
-function SourceStatus({ source }: { source: TaskSource }) {
+/** 顶栏那颗灯：数据从哪来。三种状态各自说清楚，不含糊。 */
+function SourceBadge({ source }: { source: TaskSource }) {
   const { snapshot, refresh, refreshing } = source
   if (snapshot.kind === 'board') {
     return (
-      <span className="dsptb-src" title="数据来自任务看板的内存镜像，改动会立刻反映到这里">
-        <span className="dsptb-dot" data-k="board" />
-        看板实时
-        {snapshot.boardEnabled === false ? '（看板的扩展开关关着）' : ''}
-        <span>· {snapshot.tasks.length} 个任务</span>
+      <span className="src-badge live" title="数据来自任务看板的客户端服务，改动会立刻反映到这里">
+        <span className="dot" aria-hidden="true" />
+        <span>实时</span>
+        {snapshot.boardEnabled === false ? <span className="src-note">（看板的扩展开关关着）</span> : null}
       </span>
     )
   }
   if (snapshot.kind === 'ledger') {
     return (
-      <span className="dsptb-src" title={`任务看板没在场，读的是账本快照：${snapshot.path ?? ''}\n账本变了这里不会自己更新，点「刷新」重新读`}>
-        <span className="dsptb-dot" data-k="ledger" />
-        账本快照 · 只读
-        <span>· {snapshot.tasks.length} 个任务</span>
-        <button type="button" className="dsptb-btn" onClick={refresh} disabled={refreshing}>
+      <span className="src-badge snapshot" title={`任务看板没在场，读的是账本快照：${snapshot.path ?? ''}\n账本变了这里不会自己更新`}>
+        <span className="dot" aria-hidden="true" />
+        <span>快照 · 只读</span>
+        <button type="button" className="btn btn-secondary" style={{ height: 22, fontSize: 11 }} onClick={refresh} disabled={refreshing}>
           {refreshing ? '读取中…' : '刷新'}
         </button>
       </span>
     )
   }
   return (
-    <span className="dsptb-src">
-      <span className="dsptb-dot" data-k="unavailable" />
-      没有数据
-      <button type="button" className="dsptb-btn" onClick={refresh} disabled={refreshing}>
-        {refreshing ? '读取中…' : '重试'}
-      </button>
+    <span className="src-badge stale" title={snapshot.detail ?? snapshot.reason ?? ''}>
+      <span className="dot" aria-hidden="true" />
+      <span>没有数据</span>
     </span>
   )
 }
 
-/** 一个任务都没有时占满整页，并说清为什么。 */
-function Blank({ source, ctx }: { source: TaskSource; ctx: any }) {
+/**
+ * 降级横幅。**只在真的降级时出现**，写清楚读的是哪个文件、什么时候写的。
+ * 这条不能省：用户看到的是同一张看板，但一份会实时变、一份不会——
+ * 不说明白的话，他会以为插件坏了。
+ */
+function Banner({ source }: { source: TaskSource }) {
   const { snapshot } = source
+  if (snapshot.kind === 'board') return null
+
   if (snapshot.kind === 'unavailable' && snapshot.reason === 'starting') {
-    return (
-      <div className="dsptb-blank">
-        <h3>正在找数据…</h3>
-        <p>先问任务看板，问不到再读账本。</p>
-      </div>
-    )
+    return <div className="banner" role="status">正在找数据…先问任务看板，问不到再读账本。</div>
   }
+
   if (snapshot.kind === 'unavailable') {
-    const boardAlive = (() => {
-      try {
-        return ctx.get('taskBoard') !== undefined
-      } catch {
-        return false
-      }
-    })()
+    const text =
+      snapshot.reason === 'ledger-missing' ? '账本文件还不存在——任务看板大概没跑过。'
+      : snapshot.reason === 'schema-mismatch' ? `账本格式对不上（文件里是 ${String(snapshot.detail ?? '未知版本')}），不猜字段，所以什么都不画。`
+      : '任务看板没在场，账本也读不到。'
     return (
-      <div className="dsptb-blank">
-        <h3>拿不到任务数据</h3>
-        <p>
-          {snapshot.reason === 'ledger-missing'
-            ? '账本文件还不存在——任务看板大概没跑过。'
-            : snapshot.reason === 'schema-mismatch'
-              ? `账本格式对不上（文件里是 ${String((snapshot as { detail?: string }).detail ?? '未知版本')}），不猜字段，所以什么都不画。`
-              : '看板不在场，账本也读不到。'}
-        </p>
-        {boardAlive ? null : <p>任务看板这个插件现在没有加载。</p>}
-        {snapshot.path !== undefined ? <code>{snapshot.path}</code> : null}
-        <button type="button" className="dsptb-btn" onClick={source.refresh}>
-          再试一次
-        </button>
+      <div className="banner" role="status">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" aria-hidden="true">
+          <path d="M8 2.4 14.2 13H1.8z" />
+          <path d="M8 6.4v3.1" strokeLinecap="round" />
+          <path d="M8 11.3v.6" strokeLinecap="round" />
+        </svg>
+        <span>
+          {text}
+          {snapshot.path !== undefined ? <> <span className="mono">{snapshot.path}</span></> : null}
+        </span>
       </div>
     )
   }
+
   return (
-    <div className="dsptb-blank">
-      <h3>还没有任务</h3>
-      <p>{snapshot.kind === 'board' ? '在任务看板里建一张卡，这里就有了。' : '账本里一条任务都没有。'}</p>
+    <div className="banner" role="status">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" aria-hidden="true">
+        <path d="M8 2.4 14.2 13H1.8z" />
+        <path d="M8 6.4v3.1" strokeLinecap="round" />
+        <path d="M8 11.3v.6" strokeLinecap="round" />
+      </svg>
+      <span>
+        任务看板未挂载 —— 以下数据读自 <span className="mono">$DSH_HOME/task-board/ledger-v2.json</span>
+        {' '}快照（schemaVersion 5），不含实时事件。
+      </span>
     </div>
   )
 }

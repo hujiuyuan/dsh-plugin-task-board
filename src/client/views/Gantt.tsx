@@ -1,195 +1,278 @@
 /**
- * 甘特视图：最近 21 天，一个任务一行。
+ * 甘特视图：最近 21 天，一任务一行。
  *
  * 一行画两根东西——**底下的条形**是任务本身（从创建到最近一次活动），
- * **条形里的深色小段**是每一次真实的执行。两者分开画是因为「任务挂了三天」
- * 和「任务跑了三分钟」是两件事，合成一根条就都看不出来了。
+ * **条形里的实心小段**是每一次真实的执行。两者分开画，是因为「任务挂了三天」
+ * 和「任务只跑了三分钟」是两件事，合成一根条就都看不出来了。
  *
- * 窗口是固定的 21 天、以今天结尾，**不给横向滚动条**：任务看板最重要的用途是
+ * 窗口固定 21 天、以今天结尾，**不给横向滚动条**：这个看板最重要的用途是
  * 「我该看哪个窗口」，滚来滚去的甘特恰恰是最看不出来的那种。
  */
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
+import { STATUS, barColor, hueOf } from '../tokens'
 import type { TaskIndex } from '../model'
-import { isRunning, spanEnd, triggerOf } from '../model'
+import { isRunning, lastExecution, spanEnd, triggerOf } from '../model'
 import type { TaskRecord } from '../types'
+import type { WorkspaceIndex } from '../workspaces'
+import { Dropdown, EmptyState, IconClock, Toggle, emptyTaskCopy, type Option } from './controls'
 
 const DAY_MS = 86_400_000
 const DAY_W = 44
 const NAME_W = 220
 const SPAN = 21
 const HEAD_H = 34
-/** 一次执行最短画多宽——瞬时执行（跑完就走）否则会细到看不见。 */
-const MIN_EXEC_W = 3
-/** 一个任务一次都没跑过时，条形也得有一截。 */
+const ROW_H = 30
+/** 一次执行往往只有一两小时，在整条上不到 3px —— 给个最小可见宽度。 */
+const MIN_EXEC_W = 4
+/** 从没跑过的任务也得留一截，不然条形宽 0 看不见。 */
 const MIN_BAR_MS = DAY_MS / 6
 
 interface GanttProps {
   index: TaskIndex
   now: number
+  workspaces: WorkspaceIndex
   selectedId: string | undefined
   onSelect: (task: TaskRecord) => void
+  onClearAll: () => void
+  hideSubtasks: boolean
+  onHideSubtasks: (next: boolean) => void
+  lanes: boolean
+  onLanes: (next: boolean) => void
+  /** 数据来源。只影响「一条任务都没有」那句话。 */
+  sourceKind: 'board' | 'ledger' | 'unavailable'
 }
 
-export function Gantt({ index, now, selectedId, onSelect }: GanttProps) {
+export function Gantt({
+  index, now, workspaces, selectedId, onSelect, onClearAll,
+  hideSubtasks, onHideSubtasks, lanes, onLanes, sourceKind,
+}: GanttProps) {
+  const [ws, setWs] = useState('')
+  const [trig, setTrig] = useState<'all' | 'schedule' | 'manual'>('all')
+
   const windowStart = useMemo(() => {
     const today = new Date(now)
     return new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime() - (SPAN - 1) * DAY_MS
   }, [now])
 
-  /**
-   * 上甘特的是主任务 + 它们的直接子任务。
-   * 孙任务不画——画了行数会炸，而且「哪个窗口在等我」从来不需要看到第三层。
-   */
-  const rows = useMemo(() => {
-    const out: TaskRecord[] = []
+  const wsOptions: Option[] = useMemo(
+    () => [
+      { value: '', label: '项目' },
+      ...workspaces.groups.filter(id => id !== '').map(id => ({ value: id, label: workspaces.nameOf(id), hue: hueOf(id) })),
+      { value: '__none__', label: '未钉', hue: 220 },
+    ],
+    [workspaces],
+  )
+
+  const visible = useMemo(() => {
+    const match = (task: TaskRecord): boolean => {
+      if (ws === '__none__' && task.workspaceId !== undefined) return false
+      if (ws !== '' && ws !== '__none__' && task.workspaceId !== ws) return false
+      if (trig !== 'all') {
+        const last = lastExecution(task)
+        if (last === undefined || triggerOf(last) !== trig) return false
+      }
+      return true
+    }
+    const rows: TaskRecord[] = []
     for (const root of index.roots) {
-      // 整段都落在窗口左边的任务不画：它会占一行名字，却一根条都画不出来，看着像坏了。
-      // 只要还沾着窗口一点（哪怕起点更早）就留着，左端自然被裁。
-      if (spanEnd(root, now) >= windowStart) out.push(root)
+      if (match(root) && spanEnd(root, now) >= windowStart) rows.push(root)
+      if (hideSubtasks) continue
       for (const child of index.childrenOf.get(root.id) ?? []) {
         if (child.archivedAt !== undefined) continue
-        if (spanEnd(child, now) >= windowStart) out.push(child)
+        if (match(child) && spanEnd(child, now) >= windowStart) rows.push(child)
       }
     }
-    return out
-  }, [index, now, windowStart])
+    return rows
+  }, [index, now, windowStart, ws, trig, hideSubtasks])
 
-  const trackW = SPAN * DAY_W
-  const offsetOf = (ms: number): number => ((ms - windowStart) / DAY_MS) * DAY_W
+  const filtering = ws !== '' || trig !== 'all'
 
-  if (rows.length === 0) {
+  if (visible.length === 0) {
     return (
-      <div className="dsptb-blank">
-        <h3>这 21 天里没有活动</h3>
-        <p>甘特只看最近 21 天。更早的任务还在看板和进度里。</p>
+      <div className="view">
+        <div className="view-bar">
+          <Dropdown mini className="dd-gantt-ws" value={ws} options={wsOptions} ariaLabel="甘特的项目筛选" onChange={setWs} />
+          <div className="select-wrap mini">
+            <select
+              className={trig === 'all' ? undefined : 'on'}
+              aria-label="甘特的触发方式筛选"
+              value={trig}
+              onChange={event => setTrig(event.target.value as typeof trig)}
+            >
+              <option value="all">触发</option>
+              <option value="schedule">仅定时</option>
+              <option value="manual">仅手动</option>
+            </select>
+          </div>
+        </div>
+        <div className="gantt is-empty">
+          <EmptyState
+            {...(filtering
+              ? { title: '没有匹配的任务', body: '筛选条件把账本滤空了，清一下试试。', actionLabel: '清空全部筛选', onAction: () => { setWs(''); setTrig('all'); onClearAll() } }
+              // 一条任务都没有时，说「这 21 天里没有活动」是误导 —— 它不是被时间窗滤掉的
+              : index.roots.length === 0
+                ? emptyTaskCopy(sourceKind)
+                : { title: '这 21 天里没有活动', body: '甘特只看最近 21 天，更早的任务还在看板和进度里。' })}
+          />
+        </div>
       </div>
     )
   }
 
-  const todayX = NAME_W + offsetOf(now)
+  const trackW = SPAN * DAY_W
+  const offsetOf = (ms: number): number => ((ms - windowStart) / DAY_MS) * DAY_W
+
+  /** 泳道打开时按工作区分组，未钉的排最后。 */
+  const laneList: Array<{ id: string | undefined; rows: TaskRecord[] }> = lanes
+    ? [...new Set(visible.map(task => task.workspaceId))]
+        .sort((a, b) => (a === undefined ? 1 : b === undefined ? -1 : workspaces.nameOf(a).localeCompare(workspaces.nameOf(b), 'zh')))
+        .map(id => ({ id, rows: visible.filter(task => task.workspaceId === id) }))
+    : [{ id: undefined, rows: visible }]
+
+  let rowCount = 0
+  for (const lane of laneList) rowCount += lane.rows.length + (lanes ? 1 : 0)
 
   return (
-    <div className="dsptb-gantt">
-      <div
-        className="dsptb-g-inner"
-        style={{ ['--tb-dayw' as string]: `${DAY_W}px`, ['--tb-namw' as string]: `${NAME_W}px` }}
-      >
-        <div className="dsptb-g-head" style={{ top: 0 }}>
-          <div className="dsptb-g-corner">任务</div>
-          <div className="dsptb-g-dates">
-            {Array.from({ length: SPAN }, (_, i) => {
-              const date = new Date(windowStart + i * DAY_MS)
-              const isToday = i === SPAN - 1
-              // 每三天写一个日期，其余画刻度；最后一天一定写（那就是今天）
-              const show = i % 3 === 0 || isToday
-              return (
-                <div
-                  key={i}
-                  className="dsptb-g-cell"
-                  data-today={isToday ? 'true' : 'false'}
-                  style={{ width: DAY_W }}
-                >
-                  {show ? `${date.getMonth() + 1}/${date.getDate()}` : <span style={{ opacity: 0.35 }}>·</span>}
-                </div>
-              )
-            })}
-          </div>
+    <div className="view">
+      <div className="view-bar">
+        <Dropdown mini className="dd-gantt-ws" value={ws} options={wsOptions} ariaLabel="甘特的项目筛选" onChange={setWs} />
+        <div className="select-wrap mini">
+          <select
+            className={trig === 'all' ? undefined : 'on'}
+            aria-label="甘特的触发方式筛选"
+            value={trig}
+            onChange={event => setTrig(event.target.value as typeof trig)}
+          >
+            <option value="all">触发</option>
+            <option value="schedule">仅定时</option>
+            <option value="manual">仅手动</option>
+          </select>
         </div>
+      </div>
 
-        {rows.map(task => {
-          const isChild = task.parentId !== undefined
-          const end = Math.max(spanEnd(task, now), task.createdAt + MIN_BAR_MS)
-          let x0 = offsetOf(task.createdAt)
-          let x1 = offsetOf(end)
-          const clipL = x0 < 0
-          const clipR = x1 > trackW
-          if (clipL) x0 = 0
-          if (clipR) x1 = trackW
-          let width = Math.max(x1 - x0, 8)
-          if (x0 + width > trackW) x0 = Math.max(0, trackW - width)
-          width = Math.min(width, trackW - x0)
+      <div className="g-note">
+        <p className="view-note">口径：任务从创建到最近一次活动的时间跨度 · 竖线＝今天 · 实心方块＝定时触发（按来源推断）</p>
+        <Toggle checked={hideSubtasks} label="隐藏子任务" title="子任务跟不跟在父任务后面显示。只影响这张甘特图" onChange={onHideSubtasks} />
+        <Toggle checked={lanes} label="按工作区分泳道" onChange={onLanes} />
+      </div>
 
-          const running = isRunning(task)
-          const tip = [
-            task.title,
-            `创建 ${new Date(task.createdAt).toLocaleString()}`,
-            running ? '此刻有人在跑' : `最近活动 ${new Date(end).toLocaleString()}`,
-            `${task.executions.length} 次执行`,
-          ].join('\n')
-
-          return (
-            <div className="dsptb-g-row" key={task.id}>
-              <button
-                type="button"
-                className="dsptb-g-name"
-                data-child={isChild ? 'true' : 'false'}
-                data-sel={task.id === selectedId ? 'true' : 'false'}
-                onClick={() => onSelect(task)}
-                title={tip}
-                style={{ background: 'none', border: 0, textAlign: 'left', cursor: 'pointer' }}
-              >
-                <span
-                  className="dsptb-hdot"
-                  style={{ background: `var(--tb-tone-${toneKey(task)})`, flex: 'none' }}
-                  aria-hidden="true"
-                />
-                {isChild ? <span style={{ opacity: 0.5 }} aria-hidden="true">└</span> : null}
-                {task.schedule?.enabled === true ? (
-                  <span title={`定时已启用 · ${task.schedule.cron}`} style={{ flex: 'none' }}>
-                    ⏱
-                  </span>
-                ) : null}
-                <span className="ttl">{task.title}</span>
-              </button>
-
-              <div className="dsptb-g-track" style={{ width: trackW }} title={tip}>
-                <div className="dsptb-g-grid" />
-                <div
-                  className="dsptb-g-bar"
-                  data-s={task.status}
-                  style={{ left: x0, width, opacity: clipL || clipR ? 0.75 : 1 }}
-                >
-                  {task.executions.map(execution => {
-                    let a = offsetOf(execution.startedAt)
-                    let b = offsetOf(execution.endedAt ?? now)
-                    if (b < 0 || a > trackW) return null
-                    a = Math.max(a, 0)
-                    b = Math.min(b, trackW)
-                    const scheduled = triggerOf(execution) === 'schedule'
-                    return (
-                      <i
-                        key={execution.id}
-                        className="dsptb-g-exec"
-                        style={{ left: a - x0, width: Math.max(b - a, MIN_EXEC_W), borderRadius: scheduled ? 0 : 3 }}
-                        title={`${scheduled ? '定时触发（按来源推断）' : '手动触发'} · ${new Date(execution.startedAt).toLocaleString()}`}
-                      />
-                    )
-                  })}
-                </div>
-                {running ? <span className="dsptb-g-pulse" style={{ left: x0 + width }} /> : null}
-              </div>
+      <div className="gantt">
+        <div className="g-inner">
+          <div className="g-head">
+            <div className="g-corner">任务</div>
+            <div className="g-dates">
+              {Array.from({ length: SPAN }, (_, i) => {
+                const date = new Date(windowStart + i * DAY_MS)
+                const isToday = i === SPAN - 1
+                return (
+                  <div key={i} className={`cell${isToday ? ' today' : ''}`} style={{ width: DAY_W }}>
+                    {i % 3 === 0 || isToday
+                      ? `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+                      : <span className="tick" />}
+                  </div>
+                )
+              })}
             </div>
-          )
-        })}
+          </div>
 
-        <div className="dsptb-g-today" style={{ left: todayX, top: HEAD_H, height: rows.length * 30 }} />
+          {laneList.map((lane, laneIndex) => (
+            <div key={`lane-${laneIndex}`}>
+              {lanes ? (
+                <div className="g-row g-lane">
+                  <div className="g-name">
+                    <span className="wdot" style={{ ['--hue' as string]: String(hueOf(lane.id ?? '')) }} aria-hidden="true" />
+                    <span className="ttl">{workspaces.nameOf(lane.id)}</span>
+                    <span style={{ marginLeft: 'auto', fontWeight: 400, color: 'var(--label-tertiary)' }}>{lane.rows.length}</span>
+                  </div>
+                  <div className="g-rest" style={{ width: trackW }} />
+                </div>
+              ) : null}
+
+              {lane.rows.map(task => {
+                const isChild = task.parentId !== undefined
+                const end = Math.max(spanEnd(task, now), task.createdAt + MIN_BAR_MS)
+                let x0 = offsetOf(task.createdAt)
+                let x1 = offsetOf(end)
+                const clipL = x0 < 0
+                const clipR = x1 > trackW
+                if (clipL) x0 = 0
+                if (clipR) x1 = trackW
+                let width = Math.max(x1 - x0, 8)
+                if (x0 + width > trackW) x0 = Math.max(0, trackW - width)
+                width = Math.min(width, trackW - x0)
+
+                const running = isRunning(task)
+                const last = lastExecution(task)
+                const st = STATUS[task.status]
+                const tip = `${task.title} · 创建 ${new Date(task.createdAt).toLocaleString()} → ${running ? '至今' : new Date(end).toLocaleString()}`
+
+                return (
+                  <div className="g-row" key={task.id}>
+                    <button
+                      type="button"
+                      className={`g-name${isChild ? ' child' : ''}`}
+                      onClick={() => onSelect(task)}
+                      title={tip}
+                    >
+                      {isChild ? <span className="br" aria-hidden="true">└</span> : null}
+                      <span
+                        className={`g-wsmark${task.workspaceId === undefined ? ' unpin' : ''}`}
+                        style={{ ['--hue' as string]: String(hueOf(task.workspaceId ?? '')) }}
+                        title={workspaces.pathOf(task.workspaceId) ?? workspaces.nameOf(task.workspaceId)}
+                      >
+                        {workspaces.abbrOf(task.workspaceId)}
+                      </span>
+                      {task.schedule !== undefined ? (
+                        <span
+                          className="clk"
+                          title={task.schedule.enabled ? `定时已启用 · ${task.schedule.cron}` : `定时未启用 · ${task.schedule.cron}`}
+                        >
+                          <IconClock filled={task.schedule.enabled} />
+                        </span>
+                      ) : null}
+                      <span className="ttl" title={task.title}>{task.title}</span>
+                    </button>
+
+                    <div
+                      className="g-track"
+                      style={{ width: trackW, ['--bh' as string]: String(st.hue), ['--bs' as string]: st.sat, ['--bl' as string]: st.lig }}
+                      title={tip}
+                    >
+                      <div className="g-grid" />
+                      <div
+                        className={`g-bar ${task.status}${clipL ? ' clip-l' : ''}${clipR ? ' clip-r' : ''}`}
+                        style={{ left: x0, width }}
+                      >
+                        {task.executions.map(execution => {
+                          let a = offsetOf(execution.startedAt)
+                          let b = offsetOf(execution.endedAt ?? now)
+                          if (b < 0 || a > trackW) return null
+                          a = Math.max(a, 0)
+                          b = Math.min(b, trackW)
+                          const scheduled = triggerOf(execution) === 'schedule'
+                          return (
+                            <i
+                              key={execution.id}
+                              className={`g-exec${scheduled ? ' is-trig' : ''}`}
+                              style={{ left: a - x0, width: Math.max(b - a, scheduled ? 8 : MIN_EXEC_W) }}
+                              title={`${scheduled ? '定时触发（按来源推断）' : '手动触发'} ${new Date(execution.startedAt).toLocaleString()}`}
+                            />
+                          )
+                        })}
+                      </div>
+                      {last !== undefined && last.endedAt === undefined ? (
+                        <span className="g-pulse" style={{ left: x0 + width }} />
+                      ) : null}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          ))}
+
+          <div className="g-today" style={{ left: NAME_W + offsetOf(now), top: HEAD_H, height: rowCount * ROW_H }} />
+        </div>
       </div>
     </div>
   )
-}
-
-/** 状态 → 本地色别名后缀。 */
-function toneKey(task: TaskRecord): string {
-  switch (task.status) {
-    case 'todo':
-      return 'business'
-    case 'running':
-      return 'warn'
-    case 'done':
-      return 'success'
-    case 'failed':
-      return 'error'
-    default:
-      return 'idle'
-  }
 }

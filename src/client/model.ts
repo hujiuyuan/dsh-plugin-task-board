@@ -196,24 +196,45 @@ export interface DayGroup {
 /**
  * 把「已完成 / 已失败」那两列按天分组。
  *
- * 分的是**最后活动的那一天**（`updatedAt`）而不是创建时间：一个三个月前建、
- * 今天才跑完的任务出现在「三个月前」那一组里没有任何用处。
+ * 分的是**结算那一天**（`spanEnd`，也就是卡片第四行写出来的那个时间），不是创建时间
+ * ——一个三个月前建、今天才跑完的任务落在「三个月前」那一组里没有用处。
+ *
+ * 特别注意这里用的是 `spanEnd` 而不是 `updatedAt`：卡片上写着「结算 10-09」，
+ * 却被分进「10-12」那一组，是那种看半天才反应过来哪里不对的错。
  */
-export function groupByDay(tasks: readonly TaskRecord[]): DayGroup[] {
+export function groupByDay(tasks: readonly TaskRecord[], now: number): DayGroup[] {
   const buckets = new Map<string, TaskRecord[]>()
   for (const task of tasks) {
-    const key = dayKey(task.updatedAt)
+    const key = dayKey(spanEnd(task, now))
     const bucket = buckets.get(key)
     if (bucket === undefined) buckets.set(key, [task])
     else bucket.push(task)
   }
   return [...buckets.entries()]
     .map(([key, items]) => {
-      items.sort((a, b) => b.updatedAt - a.updatedAt)
+      items.sort((a, b) => spanEnd(b, now) - spanEnd(a, now))
       const weekday = new Date(`${key}T12:00:00`).getDay()
       return { key, items, weekend: weekday === 0 || weekday === 6 }
     })
     .sort((a, b) => (a.key < b.key ? 1 : -1))
+}
+
+/**
+ * 按**工作日**分批，从最新往回数。
+ *
+ * 为什么不用自然日：一次显示 7 个自然日的话，一个跨周末的批次里只有 5 天有内容，
+ * 用户点「更多」点两次才能看到一周前的活。数满 7 个工作日就停，中间夹到的周末组
+ * 照样收进来——它们本来就没几条。
+ */
+export function paginateByWorkday(groups: readonly DayGroup[], workdays: number): DayGroup[] {
+  const out: DayGroup[] = []
+  let counted = 0
+  for (const group of groups) {
+    if (counted >= workdays) break
+    out.push(group)
+    if (!group.weekend) counted += 1
+  }
+  return out
 }
 
 /** 日期的中文写法；跨年才带年份。 */
