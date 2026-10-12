@@ -220,30 +220,7 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
               </div>
 
               {task.schedule !== undefined ? (
-                <div className="d-sec">
-                  <h3>排期</h3>
-                  <div className="d-kv">
-                    <div className="row">
-                      <span className="k">状态</span>
-                      <span className="v" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                        <IconClock filled={task.schedule.enabled} />
-                        {task.schedule.enabled ? '已启用' : '未启用'} · {humanCron(task.schedule.cron)}
-                        {task.schedule.timeZone !== undefined ? ` · ${task.schedule.timeZone}` : ''}
-                      </span>
-                    </div>
-                    <div className="row">
-                      <span className="k">下次</span>
-                      <span className="v">{task.schedule.nextRunAt === undefined ? '—' : new Date(task.schedule.nextRunAt).toLocaleString()}</span>
-                    </div>
-                    <div className="row">
-                      <span className="k">上次触发</span>
-                      <span className="v">{task.schedule.lastTriggeredAt === undefined ? '还没有触发过' : new Date(task.schedule.lastTriggeredAt).toLocaleString()}</span>
-                    </div>
-                  </div>
-                  <p className="view-note" style={{ marginTop: 8 }}>
-                    排期在这一版是只读的：改排期要写账本，而写只能走任务看板的公开契约。
-                  </p>
-                </div>
+                <ScheduleSection schedule={task.schedule} />
               ) : null}
             </>
           ) : null}
@@ -314,10 +291,14 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
                           : execution.result === 'failed'
                             ? 'var(--state-error)'
                             : 'var(--label-tertiary)'
+                      // 「会话」那一页显示的就是最近这一次 —— 在这一列里把它标出来，
+                      // 两个页对得上，用户不用自己数「哪个才是刚才看的那个」
+                      const current = last !== undefined && execution.id === last.id
                       return (
-                        <div className="d-ex" key={execution.id}>
-                          <div className="r1" title={`第 ${ordinal} 次 · 开始 ${new Date(execution.startedAt).toLocaleString()}${execution.endedAt === undefined ? ' / 还在跑' : ` · 结束 ${new Date(execution.endedAt).toLocaleString()}`}`}>
+                        <div className={`d-ex${current ? ' on' : ''}`} key={execution.id}>
+                          <div className="r1" title={`第 ${ordinal} 次 · 开始 ${new Date(execution.startedAt).toLocaleString()}${execution.endedAt === undefined ? ' / 还在跑' : ` · 结束 ${new Date(execution.endedAt).toLocaleString()}`}${current ? '（「会话」那一页显示的就是这一次）' : ''}`}>
                             <span className="ord">第 {ordinal} 次</span>
+                            {current ? <span className="cur-mark" aria-label="当前查看的这一次">当前</span> : null}
                             <span className="dot" style={{ background: tone }} aria-hidden="true" />
                             <span className="when">{shortTime(execution.startedAt, now)}</span>
                             <span className="res" style={{ color: tone }}>{open ? '运行中' : outcomeLabel(execution)}</span>
@@ -482,6 +463,104 @@ function IntentPane({ task, intent, enrichment }: { task: TaskRecord; intent: In
             {enrichment.saveError !== null ? ` 改动存不下：${enrichment.saveError}` : ''}
           </p>
         </>
+      ) : null}
+    </div>
+  )
+}
+
+/** 常见的五种 cron 写法，用作「只读控件」里的预设。 */
+const CRON_PRESETS: ReadonlyArray<{ label: string; cron: string }> = [
+  { label: '每小时', cron: '0 * * * *' },
+  { label: '每天 9 点', cron: '0 9 * * *' },
+  { label: '每周一 9 点', cron: '0 9 * * 1' },
+  { label: '每月 1 号 9 点', cron: '0 9 1 * *' },
+  { label: '每 15 分钟', cron: '*/15 * * * *' },
+]
+
+/**
+ * 排期。
+ *
+ * 主视图是三行只读事实（状态 / 下次 / 上次触发）。底下那个「看只读控件」
+ * 展开出来的**是真的禁用控件，不是画几张图糊弄**：
+ *   - 开关、预设按钮、cron 输入框全部 `disabled`，点不动
+ *   - 每条都带 `title` 说清为什么动不了
+ *
+ * 为什么要摆一排点不动的东西：用户看到「每天 9 点」，下一个念头就是「我想改成
+ * 10 点」。给他一个真能按的开关然后再弹窗说「不行」，比一开始就灰着更气人。
+ * 把改不了这件事**在控件本身上**说清楚，他才知道该去哪儿改。
+ */
+function ScheduleSection({ schedule }: { schedule: NonNullable<TaskRecord['schedule']> }) {
+  const [open, setOpen] = useState(false)
+  const why = '这一版是只读的：改排期要写账本，而写只能走任务看板的公开契约'
+  const matchesPreset = CRON_PRESETS.find(item => item.cron === schedule.cron)
+
+  return (
+    <div className="d-sec">
+      <h3>排期</h3>
+      <div className="d-kv">
+        <div className="row">
+          <span className="k">状态</span>
+          <span className="v" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <IconClock filled={schedule.enabled} />
+            {schedule.enabled ? '已启用' : '未启用'} · {humanCron(schedule.cron)}
+            {schedule.timeZone !== undefined ? ` · ${schedule.timeZone}` : ''}
+          </span>
+        </div>
+        <div className="row">
+          <span className="k">下次</span>
+          <span className="v">{schedule.nextRunAt === undefined ? '—' : new Date(schedule.nextRunAt).toLocaleString()}</span>
+        </div>
+        <div className="row">
+          <span className="k">上次触发</span>
+          <span className="v">{schedule.lastTriggeredAt === undefined ? '还没有触发过' : new Date(schedule.lastTriggeredAt).toLocaleString()}</span>
+        </div>
+      </div>
+
+      <button type="button" className="sched-toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}>
+        <span className={`caret${open ? ' open' : ''}`} aria-hidden="true">▸</span>
+        {open ? '收起只读控件' : '看只读控件'}
+      </button>
+
+      {open ? (
+        <div className="sched-ro" aria-label="排期控件（只读）">
+          <div className="sro-row">
+            <span className="k">启用</span>
+            <label className="switch is-ro" title={why}>
+              <input type="checkbox" checked={schedule.enabled} disabled readOnly />
+              <span className="track" aria-hidden="true" />
+              <span className="txt">{schedule.enabled ? '开' : '关'}</span>
+            </label>
+          </div>
+
+          <div className="sro-row">
+            <span className="k">预设</span>
+            <span className="sro-presets">
+              {CRON_PRESETS.map(item => (
+                <button
+                  key={item.cron}
+                  type="button"
+                  className={`btn btn-secondary${item.cron === schedule.cron ? ' on' : ''}`}
+                  disabled
+                  title={why}
+                  aria-pressed={item.cron === schedule.cron}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </span>
+          </div>
+
+          <div className="sro-row">
+            <span className="k">表达式</span>
+            <input className="sro-cron" value={schedule.cron} disabled readOnly title={why} aria-label="cron 表达式（只读）" />
+            <span className="sro-human">{humanCron(schedule.cron)}</span>
+          </div>
+
+          {matchesPreset === undefined ? (
+            <p className="view-note">这个表达式不在上面五个预设里——预设只是常用写法，不是全部。</p>
+          ) : null}
+          <p className="ro-reason">{why}。</p>
+        </div>
       ) : null}
     </div>
   )

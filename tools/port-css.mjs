@@ -307,6 +307,35 @@ const TAIL = `
 .dsptb .pg-sub{grid-column:1 / -1;color:var(--label-tertiary)}
 .dsptb .pg-note{margin-top:6px;font-size:11px;color:var(--label-tertiary)}
 .dsptb .thin{color:var(--label-tertiary);font-weight:400}
+
+/* 排期的「只读控件」展开区。控件是真的禁用控件，不是画出来的样子。 */
+.dsptb .sched-toggle{
+  display:inline-flex;align-items:center;gap:5px;margin-top:10px;
+  font-size:11px;color:var(--label-secondary);background:none;border:0;cursor:pointer;padding:2px 0;
+}
+.dsptb .sched-toggle:hover{color:var(--label-primary)}
+.dsptb .sched-ro{
+  margin-top:8px;padding:10px 12px;border-radius:8px;
+  background:var(--bg-base);border:1px dashed var(--border-l3);
+  display:flex;flex-direction:column;gap:10px;
+}
+.dsptb .sro-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.dsptb .sro-row .k{flex:0 0 52px;font-size:11px;color:var(--label-tertiary)}
+.dsptb .sro-presets{display:flex;gap:6px;flex-wrap:wrap}
+.dsptb .sched-ro .btn[disabled]{opacity:.45;cursor:not-allowed}
+.dsptb .sched-ro .btn.on{border-color:var(--brand);color:var(--brand)}
+.dsptb .sro-cron{
+  width:170px;padding:4px 8px;border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:12px;background:var(--input-major);border:1px solid var(--border-l2);color:var(--label-secondary);
+}
+.dsptb .sro-human{font-size:12px;color:var(--label-tertiary)}
+
+/* 「会话」那一页正在看的那一次执行，在这一列里标出来 */
+.dsptb .d-ex.on{border-color:var(--brand);background:var(--bg-layer-2)}
+.dsptb .d-ex .cur-mark{
+  font-size:10px;line-height:1;padding:2px 5px;border-radius:4px;
+  color:var(--brand);border:1px solid var(--brand);
+}
 `
 
 /**
