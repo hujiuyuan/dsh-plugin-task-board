@@ -64,8 +64,21 @@ interface HostContext {
 export const name = 'dsh-plugin-task-board'
 export const inject = ['webServer']
 
-/** 账本里我们认得的 schemaVersion。不匹配就降级，不猜。 */
-const KNOWN_SCHEMA_VERSION = 5
+/**
+ * 我们认得的账本 schemaVersion。
+ *
+ * **是一个区间不是某一个值。** 看板自己会把老账本逐代迁移上来，当前那一代是 6；
+ * 而它迁移时我们**读到的还是盘上那份原文**（退回读快照那条路根本不等它），
+ * 所以 5 和 6 都得认。
+ *
+ * 之前这里写死 5，结果用户真实账本升到 6 之后，兜底那条路整体失效 ——
+ * 而且**看不出来**：看板在场时走的是实时镜像，一点毛病没有；只有看板不在场、
+ * 真要兜底的时候，界面上才出现「账本格式对不上」。本地加载时抓到的。
+ *
+ * 每一代我读的字段都在（v6 只加了 `mode` / `runCount`，那两处已经按「可能没有」
+ * 写了），所以认下这几代是安全的。**不认的一律降级，不猜字段。**
+ */
+const KNOWN_SCHEMA_VERSIONS = [2, 3, 4, 5, 6] as const
 
 /** 账本相对 DSH 数据根的路径（看板自己的私有文件）。 */
 const LEDGER_RELATIVE_PATH = join('task-board', 'ledger-v2.json')
@@ -321,12 +334,15 @@ function start(ctx: HostContext, route: (spec: WebServerRoute) => void, keep: Ke
 
       const schemaVersion = parsed?.schemaVersion
       const tasks = Array.isArray(parsed?.tasks) ? parsed.tasks.filter(isTaskLike) : null
-      if (schemaVersion !== KNOWN_SCHEMA_VERSION || tasks === null) {
+      const recognized = (KNOWN_SCHEMA_VERSIONS as readonly number[]).includes(schemaVersion)
+      if (!recognized || tasks === null) {
         json(res, 200, {
           ok: false,
           reason: 'schema-mismatch',
-          expected: KNOWN_SCHEMA_VERSION,
-          actual: schemaVersion,
+          // 界面上要能说出「文件里是几、我们认得几」，所以两个都带回去。
+          // 光给一个 expected 的话，文案只能写「格式对不上」——用户不知道该怪谁
+          supported: [...KNOWN_SCHEMA_VERSIONS],
+          actual: schemaVersion ?? null,
           path,
         })
         return

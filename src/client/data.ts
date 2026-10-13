@@ -29,6 +29,10 @@ export interface Snapshot {
   path?: string
   reason?: string
   detail?: string
+  /** 快照读的账本是第几代（只有 kind==='ledger' 时有意义）。 */
+  schemaVersion?: number
+  /** 格式对不上时：文件里是几、我们认得几。 */
+  schema?: { actual: number | null; supported: number[] }
   /** 取到这份数据的时刻。 */
   at: number
 }
@@ -63,7 +67,12 @@ interface LedgerResponse {
   path?: string
   revision?: number
   readAt?: number
+  schemaVersion?: number
   tasks?: TaskRecord[]
+  /** 认得的那些代（`schema-mismatch` 时给）。 */
+  supported?: number[]
+  /** 文件里实际是哪一代（`schema-mismatch` 时给）。 */
+  actual?: number | null
 }
 
 async function fetchLedger(signal: AbortSignal): Promise<Snapshot> {
@@ -80,6 +89,16 @@ async function fetchLedger(signal: AbortSignal): Promise<Snapshot> {
         reason: body.reason ?? 'ledger-unavailable',
         detail: body.detail,
         path: body.path,
+        // 格式对不上时，把「文件里是几 / 我认得几」原样带上去。
+        // 只带一句「对不上」的话，用户既不知道该升级谁，也不知道是不是自己弄坏了
+        ...(body.reason === 'schema-mismatch'
+          ? {
+              schema: {
+                actual: body.actual ?? null,
+                supported: body.supported ?? [],
+              },
+            }
+          : {}),
         at: Date.now(),
       }
     }
@@ -87,6 +106,7 @@ async function fetchLedger(signal: AbortSignal): Promise<Snapshot> {
       kind: 'ledger',
       tasks: body.tasks ?? [],
       path: body.path,
+      schemaVersion: body.schemaVersion,
       at: body.readAt ?? Date.now(),
     }
   } catch (error) {

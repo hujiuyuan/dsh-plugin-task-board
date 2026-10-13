@@ -324,3 +324,17 @@ export function EmptyState({
     </div>
   )
 }
+
+/**
+ * 五个常用的 cron 写法。**预设只是常用写法，不是全部** —— 认不出的一律留给手填，
+ * 界面上从来不假装只有这五种。
+ *
+ * 放在这里而不是抽屉里：新建表单和抽屉各要一份，抄两遍迟早会不一样。
+ */
+export const CRON_PRESETS: ReadonlyArray<{ label: string; cron: string }> = [
+  { label: '每小时', cron: '0 * * * *' },
+  { label: '每天 9 点', cron: '0 9 * * *' },
+  { label: '每周一 9 点', cron: '0 9 * * 1' },
+  { label: '每月 1 号 9 点', cron: '0 9 1 * *' },
+  { label: '每 15 分钟', cron: '*/15 * * * *' },
+]

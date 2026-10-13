@@ -20,7 +20,7 @@ import type { TaskRecord } from '../types'
 import type { WorkspaceIndex } from '../workspaces'
 import type { BoardWrite, SchedulePatch } from '../write'
 import { writeSchedule } from '../write'
-import { FieldBlock, IconClock, SourceTag } from './controls'
+import { CRON_PRESETS, FieldBlock, IconClock, SourceTag } from './controls'
 
 type Tab = 'conversation' | 'goal' | 'subtasks' | 'schedule'
 
@@ -577,15 +577,6 @@ function IntentPane({ task, intent, enrichment, transcriptText }: { task: TaskRe
     </div>
   )
 }
-
-/** 常见的五种 cron 写法。预设只是常用写法，不是全部 —— 认不出的一律留给手填。 */
-const CRON_PRESETS: ReadonlyArray<{ label: string; cron: string }> = [
-  { label: '每小时', cron: '0 * * * *' },
-  { label: '每天 9 点', cron: '0 9 * * *' },
-  { label: '每周一 9 点', cron: '0 9 * * 1' },
-  { label: '每月 1 号 9 点', cron: '0 9 1 * *' },
-  { label: '每 15 分钟', cron: '*/15 * * * *' },
-]
 
 /**
  * 排期。**这一块是真能改的**，不是摆一排点不动的控件。

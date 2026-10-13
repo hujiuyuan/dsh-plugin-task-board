@@ -10,7 +10,7 @@
  *      账本读得出来。这一步用真实账本，不用假数据。
  */
 import { build } from 'esbuild'
-import { mkdtempSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -156,9 +156,44 @@ const bad = (name, detail) => {
   if (ledger.status !== 200) bad('host: ledger 返回 200', `HTTP ${ledger.status}`)
   else if (ledger.body.ok === true) {
     ok('host: 读到真实账本', `${ledger.body.tasks.length} 个任务 · schemaVersion ${ledger.body.schemaVersion}`)
+    // 真实账本升代之后兜底那条路悄悄失效过一次：这里写死 5，用户升级到 6 之后
+    // 只有「看板不在场」时才看得出来 —— 而那正是最需要兜底的时候
+    if (ledger.body.schemaVersion >= 6) ok('host: 认得当前这一代账本（v6 不能拒）', `v${ledger.body.schemaVersion}`)
   } else {
     // 账本不在（新机器、看板没跑过）不是失败，是降级——但要说出来
     ok('host: 账本不可用，按降级返回', ledger.body.reason)
+  }
+
+  // 认不出的那一代必须**明说是几**。只回一句「对不上」的话，用户不知道该升级谁
+  {
+    const fake = mkdtempSync(join(tmpdir(), 'dsptb-schema-'))
+    mkdirSync(join(fake, 'task-board'), { recursive: true })
+    const seen = []
+    for (const [version, shouldPass] of [[6, true], [5, true], [2, true], [99, false], [undefined, false]]) {
+      writeFileSync(
+        join(fake, 'task-board', 'ledger-v2.json'),
+        JSON.stringify({ schemaVersion: version, revision: 1, tasks: [] }),
+      )
+      const previous = process.env.DSH_HOME
+      process.env.DSH_HOME = fake
+      const probe = await call(mod.LEDGER_PATH)
+      process.env.DSH_HOME = previous
+      const label = version === undefined ? '没有 schemaVersion' : `v${version}`
+      if (shouldPass) {
+        if (probe.body.ok === true) ok(`host: ${label} 的账本读得出来`, '')
+        else bad(`host: ${label} 的账本读得出来`, JSON.stringify(probe.body))
+      } else {
+        if (probe.body.ok !== true && probe.body.reason === 'schema-mismatch' && probe.body.actual === (version ?? null)) {
+          seen.push(probe.body)
+        } else bad(`host: ${label} 的账本要被拒、且说清是几`, JSON.stringify(probe.body))
+      }
+    }
+    if (seen.length === 2) {
+      const supported = seen[0].supported ?? []
+      if (Array.isArray(supported) && supported.includes(6)) ok('host: 被拒时带回了「我认得哪几代」', supported.join('/'))
+      else bad('host: 被拒时带回了「我认得哪几代」', JSON.stringify(seen[0]))
+    }
+    rmSync(fake, { recursive: true, force: true })
   }
 
   // ── 归纳那条路：形状、缓存、以及「模型乱回话」时的兜底 ──────────────

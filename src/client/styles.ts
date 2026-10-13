@@ -202,7 +202,12 @@ body[data-ds-dark-theme] .dsptb .seg button[aria-pressed="true"]{background:var(
   transition:transform .16s,background .16s;
 }
 .dsptb .switch input:checked + .track{background:var(--brand);border-color:var(--brand)}
-.dsptb .switch input:checked + .track::after{transform:translateX(14px);background:#fff}
+/* 滑块**不能写死白色**。--brand 不是品牌蓝，它是「高对比实底」——
+   浅色主题下近黑、深色主题下近白。写死 #fff 的话，深色主题下就是
+   白滑块压在近白的轨道上，**整个开关看不出是开是关**（真出过，而且是在
+   把开关做成能点之后才发现：点不动的时候没人盯着它看）。
+   跟着底色反过来才对：--on-accent 浅色下白、深色下近黑。 */
+.dsptb .switch input:checked + .track::after{transform:translateX(14px);background:var(--on-accent)}
 .dsptb .switch input:focus-visible + .track{outline:2px solid var(--business-primary);outline-offset:2px}
 .dsptb .switch span.txt{font-size:13px;color:var(--label-secondary)}
 .dsptb .btn{
@@ -391,6 +396,14 @@ body[data-ds-dark-theme] .dsptb .seg button[aria-pressed="true"]{background:var(
   flex:0 0 auto;font-size:9px;line-height:1;padding:2px 4px;border-radius:4px;
   color:var(--label-tertiary);border:1px dashed var(--border-l3);
 }
+/* 新建表单里的排期块。跟抽屉里那排控件长得像，但它是表单里的一个字段，
+   所以左边不留那 52px 的标签列（标签在 .fl 上） */
+.dsptb .sched-new{padding:10px 12px;border:1px solid var(--border-l2);border-radius:8px;background:var(--bg-layer-2)}
+.dsptb .sched-cron-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px}
+.dsptb .sched-new .ro-reason{padding-top:0}
+/* 排期控件禁用时看着就是禁用的，不用点下去才知道 */
+.dsptb .sched-new .switch input[disabled]+.track{opacity:.45}
+.dsptb .sched-new .switch input[disabled]~.txt{opacity:.6}
 /* 排期改失败时那句原话。跟成功时一样占一行，颜色换成「没成」 */
 .dsptb .ro-reason.err{color:var(--state-error)}
 /* 排期控件禁用时看着就是禁用的，不用点下去才知道 */

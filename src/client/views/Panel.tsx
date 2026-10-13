@@ -331,10 +331,11 @@ export function Panel({ ctx, source, kit }: PanelProps) {
           index={index}
           workspaces={workspaces}
           write={write}
+          canSchedule={scheduleReady.ready}
           onClose={() => { write.clearError(); setForm(undefined) }}
-          onDone={(message, openId) => {
+          onDone={(message, openId, tone) => {
             setForm(undefined)
-            setToast({ text: message, tone: 'ok' })
+            setToast({ text: message, tone: tone ?? 'ok' })
             if (openId !== undefined) setSelectedId(openId)
           }}
         />
@@ -394,7 +395,8 @@ function Banner({ source }: { source: TaskSource }) {
   if (snapshot.kind === 'unavailable') {
     const text =
       snapshot.reason === 'ledger-missing' ? '账本文件还不存在——任务看板大概没跑过。'
-      : snapshot.reason === 'schema-mismatch' ? `账本格式对不上（文件里是 ${String(snapshot.detail ?? '未知版本')}），不猜字段，所以什么都不画。`
+      : snapshot.reason === 'schema-mismatch'
+        ? `账本格式对不上：文件里是第 ${snapshot.schema?.actual ?? '未知'} 代，本插件认得第 ${(snapshot.schema?.supported ?? []).join(' / ') || '未知'} 代。不猜字段，所以什么都不画 —— 升级本插件，或者把任务看板退回到那一代。`
       : '任务看板没在场，账本也读不到。'
     return (
       <div className="banner" role="status">
@@ -420,7 +422,7 @@ function Banner({ source }: { source: TaskSource }) {
       </svg>
       <span>
         任务看板未挂载 —— 以下数据读自 <span className="mono">$DSH_HOME/task-board/ledger-v2.json</span>
-        {' '}快照（schemaVersion 5），不含实时事件。
+        {' '}快照（schemaVersion {snapshot.schemaVersion ?? '未知'}），不含实时事件。
       </span>
     </div>
   )
