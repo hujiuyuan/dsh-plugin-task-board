@@ -188,22 +188,87 @@ function isTaskLike(value: unknown): boolean {
   return typeof t.id === 'string' && typeof t.title === 'string' && typeof t.status === 'string'
 }
 
-export function apply(ctx: HostContext): void {
+/**
+ * 把每一处副作用都收起来，最后一起还回去。
+ *
+ * **这不是可选的。** cordis 用一个「epoch」判断插件该不该重跑：epoch 由被注入服务的
+ * fiber uid 拼出来，**webserver 的 uid 一变（重启、配置改、换了个实例），
+ * 这个插件就会先被整体卸载、再重新 apply 一遍**。卸载时它跑的是
+ * `apply` 返回的那个函数（`_execute` 里写着：返回值是函数就 collect 成 disposer）。
+ *
+ * 早先这个函数返回 void —— 于是卸载时一个路由都没摘掉，重跑时
+ * `webserver.register` 撞上自己上次留下的那条，报
+ * 「duplicate exact route "/api/dsh-plugin-task-board/health"」，插件的启用直接失败。
+ * 真出过（用户看到的「启用失败」）。
+ */
+type Keep = (dispose: unknown) => void
+
+export function apply(ctx: HostContext): () => void {
+  const disposers: Array<() => void> = []
+  let disposed = false
+
+  /**
+   * 收一个 disposer。**同一个只跑一次**：注入回调里注册的东西会同时被
+   * 我们和 cordis 的子 fiber 收集，摘两遍得是无害的，但没必要赌它无害。
+   */
+  const keep: Keep = (dispose) => {
+    if (typeof dispose !== 'function') return
+    let spent = false
+    const once = (): void => {
+      if (spent) return
+      spent = true
+      try {
+        ;(dispose as () => void)()
+      } catch {
+        // 摘除阶段的异常不该把别的 disposer 也带走
+      }
+    }
+    // 已经卸载完了才姗姗来迟的（注入回调晚到）：当场摘掉，不留着
+    if (disposed) {
+      once()
+      return
+    }
+    disposers.push(once)
+  }
+
   const webServer = ctx.webServer
   if (!webServer) {
     ctx.logger?.warn(`[${name}] ctx.webServer 不可用（headless profile？），跳过路由注册`)
-    return
+    return () => {}
   }
 
-  webServer.register({
+  /**
+   * 装到一半炸了怎么办：**先把已经装上的摘干净，再把错抛出去**。
+   *
+   * 不摘的话，cordis 那次 collect 根本没发生（`_execute` 是 `const effect =
+   * runner.execute(...)`，抛了就没有返回值可收），于是那几条留在 webserver 的表里 ——
+   * 下一次重试撞上自己，再漏一次。失败一次就再也起不来了。
+   */
+  try {
+    start(ctx, webServer, keep)
+  } catch (error) {
+    disposed = true
+    for (const dispose of disposers.splice(0).reverse()) dispose()
+    throw error
+  }
+
+  return () => {
+    disposed = true
+    for (const dispose of disposers.splice(0).reverse()) dispose()
+  }
+}
+
+/** 真正去装的那一段。单独拎出来，是为了让上面那个 try 能把它整个罩住。 */
+function start(ctx: HostContext, webServer: NonNullable<HostContext['webServer']>, keep: Keep): void {
+  keep(webServer.register({
     kind: 'exact',
     path: HEALTH_PATH,
     handler: (_req: any, res: any) => {
       json(res, 200, { plugin: name, version: PLUGIN_VERSION, ok: true })
     },
-  })
+  }))
 
-  webServer.register({
+  keep(webServer.register({
     kind: 'exact',
     path: LEDGER_PATH,
     handler: async (_req: any, res: any) => {
@@ -252,12 +317,12 @@ export function apply(ctx: HostContext): void {
         tasks,
       })
     },
-  })
+  }))
 
   const where = (): string => join(dshHome(), OWN_DIR, OVERRIDES_FILE)
 
   // 人工改动那两条路由**不需要模型**，所以注册在最外层：没装模型也能改、能存。
-  webServer.register({
+  keep(webServer.register({
     kind: 'exact',
     path: OVERRIDES_PATH,
     handler: async (req: any, res: any) => {
@@ -283,7 +348,7 @@ export function apply(ctx: HostContext): void {
         json(res, 200, { ok: false, reason: 'write-failed', detail: String(error) })
       }
     },
-  })
+  }))
 
   /**
    * 宿主注入的模型服务。**可能永远不到**（这个部署就没有），所以它是可选的：
@@ -311,7 +376,7 @@ export function apply(ctx: HostContext): void {
    * 界面上是「这个部署没有模型服务」，不是一个 404。
    */
   const registerEnrich = (scope: HostContext): void => {
-    scope.webServer?.register({
+    keep(scope.webServer?.register({
       kind: 'exact',
       path: ENRICH_PATH,
       handler: async (req: any, res: any) => {
@@ -410,14 +475,14 @@ export function apply(ctx: HostContext): void {
         }
         json(res, 200, { ok: true, model, results, path })
       },
-    })
+    }))
   }
 
   // **无条件注册**，不等 llm。等的话，没有模型的部署上这条路由根本不存在，
   // 浏览器拿到的会是 404（「宿主半体没装上」），而不是「没有模型服务」。
   registerEnrich(ctx)
 
-  registerWriteRoute(ctx, webServer)
+  registerWriteRoute(ctx, webServer, keep)
 }
 
 /**
@@ -466,7 +531,11 @@ interface BoardFace {
  * 3. **扩展注册是可选的**：`ctx.inject([BOARD_SERVICE], ...)` 等到它出现才注册。
  *    看板晚加载也能接上，永远不加载就永远没有写入口。
  */
-function registerWriteRoute(ctx: HostContext, webServer: { register(route: WebServerRoute): () => void }): void {
+function registerWriteRoute(
+  ctx: HostContext,
+  webServer: { register(route: WebServerRoute): () => void },
+  keep: Keep,
+): void {
   /** 看板交出来的能力面；扩展没启动时是 undefined。 */
   let tasks: BoardTasksFace | undefined
 
@@ -474,13 +543,14 @@ function registerWriteRoute(ctx: HostContext, webServer: { register(route: WebSe
     const board = (scope.get?.(BOARD_SERVICE) ?? (scope as { [k: string]: unknown })[BOARD_SERVICE]) as BoardFace | undefined
     if (board === undefined || typeof board.registerExtension !== 'function') return
     try {
-      board.registerExtension({
+      // 注册的返回值也要收着 —— 不收的话，卸载再启用会给同一个看板注册第二遍
+      keep(board.registerExtension({
         id: EXTENSION_ID,
         apiVersion: EXTENSION_API_VERSION,
         // start/stop 是看板的开关控制的：它把扩展停掉之后，我们不持有失效的面
         start: (host: { tasks: BoardTasksFace }) => { tasks = host.tasks },
         stop: () => { tasks = undefined },
-      })
+      }))
     } catch (error) {
       // 版本对不上时看板会抛。这是**真的出了问题**（我们和它不同版），要留痕
       ctx.logger?.warn(`[${name}] 注册扩展失败：${String(error)}`)
@@ -490,7 +560,7 @@ function registerWriteRoute(ctx: HostContext, webServer: { register(route: WebSe
   if (typeof ctx.inject === 'function') ctx.inject([BOARD_SERVICE], attach)
   else attach(ctx)
 
-  webServer.register({
+  keep(webServer.register({
     kind: 'exact',
     path: WRITE_PATH,
     handler: async (req: any, res: any) => {
@@ -536,7 +606,7 @@ function registerWriteRoute(ctx: HostContext, webServer: { register(route: WebSe
         })
       }
     },
-  })
+  }))
 }
 
 /**

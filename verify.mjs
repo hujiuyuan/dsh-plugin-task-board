@@ -126,7 +126,7 @@ const bad = (name, detail) => {
     }),
     get: name => (name === 'taskBoard' ? board : name === 'llm' ? fakeLlm : undefined),
   }
-  mod.apply(ctx)
+  const dispose = mod.apply(ctx)
   for (const [name, path] of [['health', mod.HEALTH_PATH], ['ledger', mod.LEDGER_PATH], ['enrich', mod.ENRICH_PATH], ['overrides', mod.OVERRIDES_PATH]]) {
     if (!routes.has(path)) bad(`host: 注册了 ${name} 路由`, [...routes.keys()].join(', '))
     else ok(`host: 注册了 ${name} 路由`)
@@ -304,6 +304,92 @@ const bad = (name, detail) => {
     const gate = await probe(mod.ENRICH_PATH, { model: 'x/y', tasks: [{ id: 't1', title: '自检任务' }] })
     if (gate.ok !== false || gate.reason !== 'no-model') bad('host: 没有 llm 时归纳报 no-model', JSON.stringify(gate))
     else ok('host: 没有 llm 时归纳报 no-model', gate.detail)
+  }
+
+  // ── 卸载：**apply 必须把每一处副作用还回来** ──────────────────────────
+  //
+  // 这一块是真出过事的：apply 早先返回 void，卸载时一条路由都没摘掉，
+  // 重新启用时 webserver.register 撞上自己上次留下的那条，报
+  // 「duplicate exact route "/api/dsh-plugin-task-board/health"」，
+  // 插件的启用直接失败。cordis 什么时候卸载再重跑？**被注入服务（webserver）的
+  // fiber uid 一变就会** —— 也就是宿主重启 webserver、或者改配置的时候。
+  // 所以这不是边缘情况，是迟早会撞上的。
+  if (typeof dispose !== 'function') {
+    bad('host: apply 返回卸载函数（不返回就等于永不清理）', String(typeof dispose))
+  } else {
+    ok('host: apply 返回卸载函数')
+    // 假的 webServer 要真的把路由存起来，才验得出「摘没摘」
+    const live = new Map()
+    const strict = {
+      register(route) {
+        if (live.has(route.path)) throw new Error(`webserver: duplicate exact route "${route.path}"`)
+        live.set(route.path, route)
+        return () => { live.delete(route.path) }
+      },
+    }
+    const boardCalls2 = []
+    const routes2 = []
+    const mod2 = await import(`data:text/javascript;base64,${Buffer.from(`${code}\n// strict`).toString('base64')}`)
+    const ctx2 = {
+      webServer: strict,
+      logger: { warn: m => warnings.push(m) },
+      get: n => (n === 'taskBoard' ? { registerExtension: () => () => { boardCalls2.push('off') } } : undefined),
+      inject: (names, callback) => callback({
+        webServer: strict,
+        logger: { warn: m => warnings.push(m) },
+        get: n => (n === 'taskBoard' ? { registerExtension: () => () => { boardCalls2.push('off') } } : undefined),
+      }),
+    }
+    const off = mod2.apply(ctx2)
+    const first = live.size
+    if (typeof off === 'function') off()
+    const after = live.size
+    if (after !== 0) bad('host: 卸载后路由全摘干净', `还剩 ${after} 条：${[...live.keys()].join(', ')}`)
+    else ok('host: 卸载后路由全摘干净', `摘掉 ${first} 条`)
+
+    // **卸载之后能重新装一遍** —— 这就是用户看到的那次失败的原样复现
+    try {
+      const off2 = mod2.apply(ctx2)
+      if (live.size !== first) bad('host: 卸载后能重新注册（走一遍 cordis 的卸载→重跑）', `重新注册了 ${live.size} 条，第一次是 ${first} 条`)
+      else ok('host: 卸载后能重新注册（走一遍 cordis 的卸载→重跑）', `${live.size} 条`)
+      if (typeof off2 === 'function') off2()
+    } catch (error) {
+      bad('host: 卸载后能重新注册（走一遍 cordis 的卸载→重跑）', String(error))
+    }
+    void routes2
+    // 扩展注册也要还回去，不然同一个看板会被注册第二遍
+    if (!boardCalls2.includes('off')) {
+      bad('host: 卸载时把看板扩展也注销掉', JSON.stringify(boardCalls2))
+    } else ok('host: 卸载时把看板扩展也注销掉')
+
+    // 装到一半炸了不能留残骸：cordis 那次 collect 根本没发生（execute 抛了就没有
+    // 返回值可收），留下的路由会让下一次重试再撞一次 —— 失败一次就再也起不来
+    const half = new Map()
+    let calls = 0
+    const grumpy = {
+      register(route) {
+        calls += 1
+        // 第三条开始拒绝：模拟「装到一半出错」
+        if (calls >= 3) throw new Error('webserver: duplicate exact route "假装撞了"')
+        half.set(route.path, route)
+        return () => { half.delete(route.path) }
+      },
+    }
+    const mod3 = await import(`data:text/javascript;base64,${Buffer.from(`${code}\n// half`).toString('base64')}`)
+    let threw = false
+    try {
+      mod3.apply({
+        webServer: grumpy,
+        logger: { warn: () => {} },
+        inject: () => {},
+        get: () => undefined,
+      })
+    } catch {
+      threw = true
+    }
+    if (!threw) bad('host: 装到一半出错会抛出去（不能装作没事）', '没抛')
+    else if (half.size !== 0) bad('host: 装到一半出错时把已装的摘干净', `还剩 ${[...half.keys()].join(', ')}`)
+    else ok('host: 装到一半出错时把已装的摘干净')
   }
 
   await rm(sandbox, { recursive: true, force: true })
