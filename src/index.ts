@@ -238,6 +238,30 @@ export function apply(ctx: HostContext): () => void {
   }
 
   /**
+   * 注册一条路由。**撞车时不炸。**
+   *
+   * 撞车只可能有一个来源：这个进程里还留着**我们自己上一辈子**注册的同名路由 ——
+   * 那条是在「apply 还不返回卸载函数」的版本里留下的，而 webServer 没有 unregister，
+   * 谁都摘不掉它。为这个让整个插件**激活失败**，是拿最差的结果去换一个本来不严重的
+   * 问题：那条路由的 handler 还是我们自己的，功能照常。
+   *
+   * 所以撞了就记一条明确的告警、跳过这一条、继续装剩下的。别的错照旧抛出去
+   * （真冲突、参数写错那些，不能让它们被吞掉）。
+   */
+  const route = (spec: WebServerRoute): void => {
+    try {
+      keep(webServer.register(spec))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (!/duplicate/i.test(message)) throw error
+      ctx.logger?.warn(
+        `[${name}] ${spec.path} 已经被占着 —— 多半是本进程里上一次留下的（旧版本没摘干净，` +
+          `而 webServer 摘不掉别人的路由）。这一条先跳过，其余照常；重启 DSH 之后就恢复正常了。`,
+      )
+    }
+  }
+
+  /**
    * 装到一半炸了怎么办：**先把已经装上的摘干净，再把错抛出去**。
    *
    * 不摘的话，cordis 那次 collect 根本没发生（`_execute` 是 `const effect =
@@ -245,7 +269,7 @@ export function apply(ctx: HostContext): () => void {
    * 下一次重试撞上自己，再漏一次。失败一次就再也起不来了。
    */
   try {
-    start(ctx, webServer, keep)
+    start(ctx, route, keep)
   } catch (error) {
     disposed = true
     for (const dispose of disposers.splice(0).reverse()) dispose()
@@ -259,16 +283,16 @@ export function apply(ctx: HostContext): () => void {
 }
 
 /** 真正去装的那一段。单独拎出来，是为了让上面那个 try 能把它整个罩住。 */
-function start(ctx: HostContext, webServer: NonNullable<HostContext['webServer']>, keep: Keep): void {
-  keep(webServer.register({
+function start(ctx: HostContext, route: (spec: WebServerRoute) => void, keep: Keep): void {
+  route({
     kind: 'exact',
     path: HEALTH_PATH,
     handler: (_req: any, res: any) => {
       json(res, 200, { plugin: name, version: PLUGIN_VERSION, ok: true })
     },
-  }))
+  })
 
-  keep(webServer.register({
+  route({
     kind: 'exact',
     path: LEDGER_PATH,
     handler: async (_req: any, res: any) => {
@@ -317,12 +341,12 @@ function start(ctx: HostContext, webServer: NonNullable<HostContext['webServer']
         tasks,
       })
     },
-  }))
+  })
 
   const where = (): string => join(dshHome(), OWN_DIR, OVERRIDES_FILE)
 
   // 人工改动那两条路由**不需要模型**，所以注册在最外层：没装模型也能改、能存。
-  keep(webServer.register({
+  route({
     kind: 'exact',
     path: OVERRIDES_PATH,
     handler: async (req: any, res: any) => {
@@ -348,7 +372,7 @@ function start(ctx: HostContext, webServer: NonNullable<HostContext['webServer']
         json(res, 200, { ok: false, reason: 'write-failed', detail: String(error) })
       }
     },
-  }))
+  })
 
   /**
    * 宿主注入的模型服务。**可能永远不到**（这个部署就没有），所以它是可选的：
@@ -376,7 +400,7 @@ function start(ctx: HostContext, webServer: NonNullable<HostContext['webServer']
    * 界面上是「这个部署没有模型服务」，不是一个 404。
    */
   const registerEnrich = (scope: HostContext): void => {
-    keep(scope.webServer?.register({
+    route({
       kind: 'exact',
       path: ENRICH_PATH,
       handler: async (req: any, res: any) => {
@@ -475,14 +499,14 @@ function start(ctx: HostContext, webServer: NonNullable<HostContext['webServer']
         }
         json(res, 200, { ok: true, model, results, path })
       },
-    }))
+    })
   }
 
   // **无条件注册**，不等 llm。等的话，没有模型的部署上这条路由根本不存在，
   // 浏览器拿到的会是 404（「宿主半体没装上」），而不是「没有模型服务」。
   registerEnrich(ctx)
 
-  registerWriteRoute(ctx, webServer, keep)
+  registerWriteRoute(ctx, route, keep)
 }
 
 /**
@@ -533,7 +557,7 @@ interface BoardFace {
  */
 function registerWriteRoute(
   ctx: HostContext,
-  webServer: { register(route: WebServerRoute): () => void },
+  route: (spec: WebServerRoute) => void,
   keep: Keep,
 ): void {
   /** 看板交出来的能力面；扩展没启动时是 undefined。 */
@@ -560,7 +584,7 @@ function registerWriteRoute(
   if (typeof ctx.inject === 'function') ctx.inject([BOARD_SERVICE], attach)
   else attach(ctx)
 
-  keep(webServer.register({
+  route({
     kind: 'exact',
     path: WRITE_PATH,
     handler: async (req: any, res: any) => {
@@ -606,7 +630,7 @@ function registerWriteRoute(
         })
       }
     },
-  }))
+  })
 }
 
 /**

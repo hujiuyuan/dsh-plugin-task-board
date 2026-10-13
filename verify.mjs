@@ -369,8 +369,10 @@ const bad = (name, detail) => {
     const grumpy = {
       register(route) {
         calls += 1
-        // 第三条开始拒绝：模拟「装到一半出错」
-        if (calls >= 3) throw new Error('webserver: duplicate exact route "假装撞了"')
+        // 第三条开始拒绝：模拟「装到一半出错」。
+        // **故意不是 duplicate** —— duplicate 现在是容错的（跳过那一条继续装），
+        // 拿它来测回滚会测成另一件事
+        if (calls >= 3) throw new Error('route 表坏了')
         half.set(route.path, route)
         return () => { half.delete(route.path) }
       },
@@ -390,6 +392,52 @@ const bad = (name, detail) => {
     if (!threw) bad('host: 装到一半出错会抛出去（不能装作没事）', '没抛')
     else if (half.size !== 0) bad('host: 装到一半出错时把已装的摘干净', `还剩 ${[...half.keys()].join(', ')}`)
     else ok('host: 装到一半出错时把已装的摘干净')
+
+    // 进程里已经留着一条我们自己的老路由（旧版本没摘干净，而 webServer 没有
+    // unregister，谁都摘不掉）——**这不能让整个插件激活失败**。
+    // 那条路由的 handler 还是我们自己的，功能照常；跳过它、把其余装上就行。
+    const stale = new Map()
+    stale.set(mod.HEALTH_PATH, { kind: 'exact', path: mod.HEALTH_PATH, handler: () => {} })
+    const staleWarnings = []
+    const staleRoutes = new Map(stale)
+    const withStale = {
+      register(route) {
+        if (staleRoutes.has(route.path)) throw new Error(`webserver: duplicate exact route "${route.path}"`)
+        staleRoutes.set(route.path, route)
+        return () => { staleRoutes.delete(route.path) }
+      },
+    }
+    const mod4 = await import(`data:text/javascript;base64,${Buffer.from(`${code}\n// stale`).toString('base64')}`)
+    let staleThrew = null
+    try {
+      mod4.apply({
+        webServer: withStale,
+        logger: { warn: m => staleWarnings.push(m) },
+        inject: () => {},
+        get: () => undefined,
+      })
+    } catch (error) {
+      staleThrew = error
+    }
+    if (staleThrew !== null) bad('host: 撞上自己留下的老路由时不炸（跳过那一条继续装）', String(staleThrew))
+    else if (!staleRoutes.has(mod.LEDGER_PATH) || !staleRoutes.has(mod.ENRICH_PATH) || !staleRoutes.has(mod.WRITE_PATH)) {
+      bad('host: 撞车后其余路由照常装上', [...staleRoutes.keys()].join(', '))
+    } else if (!staleWarnings.some(m => m.includes('已经被占着'))) {
+      bad('host: 撞车时说清楚是「被占着」', JSON.stringify(staleWarnings))
+    } else ok('host: 撞上自己留下的老路由时不炸', `跳过 1 条，装上 ${staleRoutes.size} 条`)
+
+    // 反向：**真的跟别人撞了**（非 duplicate 的错）不能也被吞掉 ——
+    // 那种是配置写错了，得看得见
+    const broken = { register() { throw new TypeError('route 参数不对') } }
+    let brokenThrew = false
+    try {
+      const mod5 = await import(`data:text/javascript;base64,${Buffer.from(`${code}\n// broken`).toString('base64')}`)
+      mod5.apply({ webServer: broken, logger: { warn: () => {} }, inject: () => {}, get: () => undefined })
+    } catch {
+      brokenThrew = true
+    }
+    if (!brokenThrew) bad('host: 别的错照旧抛出去（不能被「撞车容错」一起吞掉）', '没抛')
+    else ok('host: 别的错照旧抛出去（不能被「撞车容错」一起吞掉）')
   }
 
   await rm(sandbox, { recursive: true, force: true })
