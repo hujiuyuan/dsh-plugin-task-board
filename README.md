@@ -397,7 +397,7 @@ npm run verify    # 提交前自检，见下
 第 3 步会真的往磁盘写文件（归纳缓存、人工改动），所以那一段开始前把 `DSH_HOME`
 换成一个临时目录——自检不该在你的 `~/.dsh` 里留东西。
 
-界面那一半另外有一套浏览器套件（headless Chrome 真渲染 + 真点击，503 条断言），
+界面那一半另外有一套浏览器套件（headless Chrome 真渲染 + 真点击，508 条断言），
 在 `/tmp/dsptb-client/`，不进仓库。
 
 `npm run build` 打包前会先跑一遍 `tsc`。esbuild 只转译不做类型检查，有些错它能
