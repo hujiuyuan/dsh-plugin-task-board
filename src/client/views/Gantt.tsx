@@ -11,7 +11,7 @@
 import { useMemo, useState } from 'react'
 import { STATUS, barColor, hueOf } from '../tokens'
 import type { TaskIndex } from '../model'
-import { isRunning, lastExecution, spanEnd, triggerOf } from '../model'
+import { isRunning, lastExecution, planOf, spanEnd, triggerOf } from '../model'
 import type { TaskRecord } from '../types'
 import type { WorkspaceIndex } from '../workspaces'
 import { Dropdown, EmptyState, IconClock, Toggle, emptyTaskCopy, type Option } from './controls'
@@ -36,6 +36,9 @@ interface GanttProps {
   onClearAll: () => void
   hideSubtasks: boolean
   onHideSubtasks: (next: boolean) => void
+  /** 藏掉「没有任务卡的会话」那些行。 */
+  hideSessions: boolean
+  onHideSessions: (next: boolean) => void
   lanes: boolean
   onLanes: (next: boolean) => void
   /** 数据来源。只影响「一条任务都没有」那句话。 */
@@ -44,7 +47,7 @@ interface GanttProps {
 
 export function Gantt({
   index, now, workspaces, selectedId, onSelect, onClearAll,
-  hideSubtasks, onHideSubtasks, lanes, onLanes, sourceKind,
+  hideSubtasks, onHideSubtasks, hideSessions, onHideSessions, lanes, onLanes, sourceKind,
 }: GanttProps) {
   const [ws, setWs] = useState('')
   const [trig, setTrig] = useState<'all' | 'schedule' | 'manual'>('all')
@@ -75,6 +78,10 @@ export function Gantt({
     }
     const rows: TaskRecord[] = []
     for (const root of index.roots) {
+      if (root.fromSession !== undefined) {
+        if (!hideSessions && match(root) && spanEnd(root, now) >= windowStart) rows.push(root)
+        continue
+      }
       if (match(root) && spanEnd(root, now) >= windowStart) rows.push(root)
       if (hideSubtasks) continue
       for (const child of index.childrenOf.get(root.id) ?? []) {
@@ -82,8 +89,11 @@ export function Gantt({
         if (match(child) && spanEnd(child, now) >= windowStart) rows.push(child)
       }
     }
-    return rows
-  }, [index, now, windowStart, ws, trig, hideSubtasks])
+    // 会话排在最后。它们没有父子关系，所以这一段排序不会打断任何一棵子树
+    // （`sort` 是稳定的，非会话行之间的相对次序一动不动），但一堆会话压在
+    // 真正的任务上面的那张甘特图，就不再回答「这 21 天在干些什么」了
+    return rows.sort((a, b) => Number(a.fromSession !== undefined) - Number(b.fromSession !== undefined))
+  }, [index, now, windowStart, ws, trig, hideSubtasks, hideSessions])
 
   const filtering = ws !== '' || trig !== 'all'
 
@@ -151,8 +161,19 @@ export function Gantt({
       </div>
 
       <div className="g-note">
-        <p className="view-note">口径：任务从创建到最近一次活动的时间跨度 · 竖线＝今天 · 实心方块＝定时触发（按来源推断）</p>
+        <p
+          className="view-note"
+          title={[
+            '条形＝任务从创建到最近一次活动的时间跨度',
+            '实心小段＝每一次真实的执行',
+            '竖线＝今天（窗口固定最近 21 天）',
+            '带「会话」标的是没有任务卡的会话，条形落在它最后一次活动的那一刻',
+          ].join('\n')}
+        >
+          口径：任务从创建到最近一次活动的时间跨度 · 竖线＝今天 · 实心方块＝定时触发（按来源推断）
+        </p>
         <Toggle checked={hideSubtasks} label="隐藏子任务" title="子任务跟不跟在父任务后面显示。只影响这张甘特图" onChange={onHideSubtasks} />
+        <Toggle checked={hideSessions} label="隐藏会话" title="没有任务卡的那些会话，也在这张图上占一行。勾上就只留挂卡的" onChange={onHideSessions} />
         <Toggle checked={lanes} label="按工作区分泳道" onChange={onLanes} />
       </div>
 
@@ -190,6 +211,7 @@ export function Gantt({
 
               {lane.rows.map(task => {
                 const isChild = task.parentId !== undefined
+                const session = task.fromSession !== undefined
                 const end = Math.max(spanEnd(task, now), task.createdAt + MIN_BAR_MS)
                 let x0 = offsetOf(task.createdAt)
                 let x1 = offsetOf(end)
@@ -204,7 +226,10 @@ export function Gantt({
                 const running = isRunning(task)
                 const last = lastExecution(task)
                 const st = STATUS[task.status]
-                const tip = `${task.title} · 创建 ${new Date(task.createdAt).toLocaleString()} → ${running ? '至今' : new Date(end).toLocaleString()}`
+                // 会话行没有「创建」，只有最后活动 —— 写「创建」是编的
+                const tip = session
+                  ? `${task.title} · 会话 ${task.fromSession} · 最后活动 ${new Date(task.updatedAt).toLocaleString()}`
+                  : `${task.title} · 创建 ${new Date(task.createdAt).toLocaleString()} → ${running ? '至今' : new Date(end).toLocaleString()}`
 
                 return (
                   <div className="g-row" key={task.id}>
@@ -222,10 +247,13 @@ export function Gantt({
                       >
                         {workspaces.abbrOf(task.workspaceId)}
                       </span>
+                      {session ? (
+                        <span className="g-sess" title="没有任务卡的会话：这根条落在它最后一次活动的那一刻">会话</span>
+                      ) : null}
                       {task.schedule !== undefined ? (
                         <span
                           className="clk"
-                          title={task.schedule.enabled ? `定时已启用 · ${task.schedule.cron}` : `定时未启用 · ${task.schedule.cron}`}
+                          title={`${task.schedule.enabled ? '定时已启用' : '定时未启用'} · ${planOf(task.schedule)}`}
                         >
                           <IconClock filled={task.schedule.enabled} />
                         </span>

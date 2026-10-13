@@ -154,22 +154,25 @@ export function EmbeddedConversation({
  */
 function FactoryOccurrence({ render }: { render: NonNullable<SlotKit['renderFactorySlot']> }): ReactNode {
   return (
-    <>
-      {/* 说清这是**真的那个**。不说的话，用户会以为跟上面那些字段一样是我们画的，
-          于是不知道自己可以在这里接着跟它说话 */}
-      <p className="view-note" style={{ marginBottom: 8 }}>
-        下面是宿主的会话页本体，可以直接在这里接着对话。
-      </p>
-      <div className="embed-frame">
-        {/*
-          第三个参数（局部组件 `slots.views`）**故意不传**。传了就等于声明
-          「我这边有会话绑定」而 views 是 session 作用域的，绑定要是没接上，
-          渲染器抛的是 SlotAssemblyError —— 那个会一路穿到最外层变白屏。
-          不传就用宿主默认的视图，对我们来说没有损失。
-        */}
-        {render('conversation.content', { variant: 'embedded', phase: 'active', hero: false })}
-      </div>
-    </>
+    /*
+      说清这是**真的那个**。不说的话，用户会以为跟上面那些字段一样是我们画的，
+      于是不知道自己可以在这里接着跟它说话。
+
+      这话放在悬停气泡里而不是页面上：它是**第一次看才需要**的一句提示，
+      放在正文里就等于每次开抽屉都收一遍过路费，而这块地方正是要腾给聊天区的。
+    */
+    <div
+      className="embed-frame"
+      title="这是宿主的会话页本体，不是本插件画的 —— 可以直接在这里接着对话"
+    >
+      {/*
+        第三个参数（局部组件 `slots.views`）**故意不传**。传了就等于声明
+        「我这边有会话绑定」而 views 是 session 作用域的，绑定要是没接上，
+        渲染器抛的是 SlotAssemblyError —— 那个会一路穿到最外层变白屏。
+        不传就用宿主默认的视图，对我们来说没有损失。
+      */}
+      {render('conversation.content', { variant: 'embedded', phase: 'active', hero: false })}
+    </div>
   )
 }
 

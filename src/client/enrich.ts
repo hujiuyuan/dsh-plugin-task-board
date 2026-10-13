@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { AiIntent } from '../enrich'
 import type { Override } from './derive'
+import { planOf } from './model'
 import type { TaskRecord } from './types'
 
 const ENRICH_URL = '/api/dsh-plugin-task-board/enrich'
@@ -260,7 +261,9 @@ function toMaterial(task: TaskRecord, transcript?: string): unknown {
     description: task.description,
     prompt: task.prompt,
     status: task.status,
-    schedule: task.schedule === undefined ? undefined : { enabled: task.schedule.enabled, cron: task.schedule.cron },
+    // 排期发**人话**（`planOf`），不发裸 cron：单次规则根本没有 cron 字段，
+    // 发过去会是一个 undefined，模型就会编一个周期出来
+    schedule: task.schedule === undefined ? undefined : { enabled: task.schedule.enabled, plan: planOf(task.schedule) },
     tags: (task.tags ?? []).map(tag => tag.name),
     runs: task.executions.slice(-8).map(execution => ({
       result: execution.endedAt === undefined ? 'running' : execution.result ?? 'settled',

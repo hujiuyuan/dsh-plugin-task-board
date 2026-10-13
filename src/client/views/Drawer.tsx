@@ -14,11 +14,12 @@ import { PRIORITY_LABEL } from '../derive'
 import { EmbeddedConversation, type SlotKit } from '../embed'
 import type { Enrichment } from '../enrich'
 import type { TaskIndex } from '../model'
-import { durationOf, humanCron, humanDuration, isRunning, lastExecution, outcomeLabel, rollupOf, shortTime, spanEnd, triggerOf } from '../model'
+import { durationOf, humanCron, humanDuration, isRunning, lastExecution, modeOf, outcomeLabel, planOf, rollupOf, runBudgetOf, shortTime, spanEnd, stopReasonOf, triggerOf } from '../model'
 import type { Transcript } from '../session'
 import type { TaskRecord } from '../types'
 import type { WorkspaceIndex } from '../workspaces'
-import type { BoardWrite } from '../write'
+import type { BoardWrite, SchedulePatch } from '../write'
+import { writeSchedule } from '../write'
 import { FieldBlock, IconClock, SourceTag } from './controls'
 
 type Tab = 'conversation' | 'goal' | 'subtasks' | 'schedule'
@@ -38,6 +39,13 @@ interface DrawerProps {
   /** 写入口。没有时「编辑」按钮禁用，原因写在按钮上。 */
   write: BoardWrite
   onEdit: () => void
+  /**
+   * 排期能不能改。走的是任务看板自己的 action 通道，**跟 `write` 不是一条路**
+   * （见 `write.ts` 顶上那段），所以是单独一个信号。
+   */
+  canSchedule: boolean
+  /** 排期改成功了。外层拿它弹一句 toast。 */
+  onScheduled: (message: string) => void
   /** 最近一次执行的会话内容。 */
   transcript: Transcript
   /** 同一份内容，掐好长度给模型用。没有会话时是 undefined。 */
@@ -52,7 +60,7 @@ function modelFor(task: TaskRecord, fallback: string | null): string | null {
   return task.model !== undefined && task.model.length > 0 ? task.model : fallback
 }
 
-export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOpenSession, intent, enrichment, write, onEdit, transcript, transcriptText, kit, ctx }: DrawerProps) {
+export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOpenSession, intent, enrichment, write, onEdit, canSchedule, onScheduled, transcript, transcriptText, kit, ctx }: DrawerProps) {
   const [tab, setTab] = useState<Tab>('conversation')
   const [copied, setCopied] = useState(false)
 
@@ -73,15 +81,25 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
   const parent = task.parentId === undefined ? undefined : index.byId.get(task.parentId)
   const last = lastExecution(task)
   const running = isRunning(task)
+  /**
+   * 这一行是「没有任务卡的会话」，不是账本里的卡。
+   *
+   * 它只剩「会话」那一页 —— 另外三页的内容（目标 / 子任务 / 执行历史）
+   * 全都来自账本字段，会话一个都没有。留着它们是三个空页，
+   * 点进去只会让人以为数据没读到。
+   */
+  const sessionId = task.fromSession
+  const isSession = sessionId !== undefined
 
-  // 换任务时，如果新任务没有那一页的内容，退回会话页——停在空白页上会让人以为坏了
-  const tabs: Array<{ id: Tab; label: string; count?: number }> = [
-    { id: 'conversation', label: '会话' },
-    { id: 'goal', label: '任务目标' },
-    { id: 'subtasks', label: '子任务', count: rollup.total },
-    { id: 'schedule', label: '定时历史', count: task.executions.length },
-  ]
-  const active = tabs.find(item => item.id === tab)!
+  const tabs: Array<{ id: Tab; label: string; count?: number }> = isSession
+    ? [{ id: 'conversation', label: '会话' }]
+    : [
+        { id: 'conversation', label: '会话' },
+        { id: 'goal', label: '任务目标' },
+        { id: 'subtasks', label: '子任务', count: rollup.total },
+        { id: 'schedule', label: '定时历史', count: task.executions.length },
+      ]
+  const active = tabs.find(item => item.id === tab) ?? tabs[0]
 
   /**
    * 能不能把宿主的会话页嵌进来。两个 kit prop 缺一个都不行 ——
@@ -90,11 +108,42 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
    */
   const canEmbed = typeof kit.renderFactorySlot === 'function' && typeof kit.SessionProvider === 'function'
 
+  /** 要打开哪个会话：会话行是自己的那个，任务卡是最近一次执行的那个。 */
+  const openId = isSession ? sessionId : last?.sessionId
+
   const openSession = (): void => {
-    if (last?.sessionId === undefined) return
-    if (onOpenSession(last.sessionId)) return
-    void navigator.clipboard?.writeText(last.sessionId).then(() => setCopied(true), () => setCopied(false))
+    if (openId === undefined) return
+    if (onOpenSession(openId)) return
+    void navigator.clipboard?.writeText(openId).then(() => setCopied(true), () => setCopied(false))
   }
+
+  /**
+   * 标题上那个悬停气泡里的内容。
+   *
+   * 这些字原来占着抽屉正文一整块，可它们是**关于这个任务的静态事实**，
+   * 不是内容 —— 每开一次抽屉都要从它们上面划过去才够得到聊天区。挪到气泡里，
+   * 想看的人悬停一下就有，不想看的人一次都不用划。
+   */
+  const headTip = (isSession
+    ? [
+        `会话 ${sessionId}`,
+        `最后活动 ${new Date(task.updatedAt).toLocaleString()}`,
+        task.status === 'running' ? '正在跑' : '已经停下',
+        '这一行是没有任务卡的会话：它没有账本，改不了，也不会有执行记录',
+      ]
+    : [
+        `${task.title}`,
+        `${task.id} · ${workspaces.nameOf(task.workspaceId)} · ${STATUS[task.status].label}`,
+        openId === undefined ? '这个任务还没跑过，还没有会话' : `会话 ${openId}`,
+        openId === undefined ? undefined : `开始 ${new Date(last!.startedAt).toLocaleString()}`,
+        openId === undefined
+          ? undefined
+          : running
+            ? `正在跑，已跑 ${humanDuration(now - last!.startedAt)}`
+            : `${outcomeLabel(last!)} · 耗时 ${humanDuration(durationOf(last!, now))}`,
+        task.description.length > 0 ? task.description : undefined,
+      ]
+  ).filter((line): line is string => line !== undefined).join('\n')
 
   return (
     <>
@@ -111,25 +160,41 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
         ) : null}
 
         <div className="drawer-head">
-          <h2>
+          <h2 title={headTip}>
             {task.title}
-            <span className="mono" style={{ color: 'var(--label-tertiary)', fontWeight: 400 }}> · {task.id}</span>
+            <span className="mono" style={{ color: 'var(--label-tertiary)', fontWeight: 400 }}>
+              {isSession ? ' · 会话' : ` · ${task.id}`}
+            </span>
           </h2>
           <span className="st" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--label-secondary)' }}>
             <span style={{ width: 7, height: 7, borderRadius: '50%', background: STATUS[task.status].css }} aria-hidden="true" />
             {STATUS[task.status].label}
           </span>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={!write.ready}
-            title={write.ready
-              ? '改标题 / 说明 / 执行提示，或者换一列'
-              : `编辑要走任务看板的写入契约，但现在走不通：${write.why ?? '未知原因'}`}
-            onClick={onEdit}
-          >
-            编辑
-          </button>
+          {/* 会话行没有账本，编辑按钮不是禁用而是根本不出现 ——
+              灰着还留个位置，等于每次都在提醒「这里少了点什么」 */}
+          {isSession ? null : (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={!write.ready}
+              title={write.ready
+                ? '改标题 / 说明 / 执行提示，或者换一列'
+                : `编辑要走任务看板的写入契约，但现在走不通：${write.why ?? '未知原因'}`}
+              onClick={onEdit}
+            >
+              编辑
+            </button>
+          )}
+          {openId === undefined ? null : (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              title={copied ? '会话 id 已复制到剪贴板' : `在宿主的会话页里打开：${openId}`}
+              onClick={openSession}
+            >
+              {copied ? '已复制' : '打开会话'}
+            </button>
+          )}
           <button type="button" className="btn btn-secondary" onClick={onClose} aria-label="关闭">✕</button>
         </div>
 
@@ -149,59 +214,44 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
           ))}
         </div>
 
-        <div className="drawer-body d-pane">
+        <div className={`drawer-body d-pane${tab === 'conversation' ? ' is-conv' : ''}`}>
           {tab === 'conversation' ? (
             <div className="d-conv">
-              <div className="d-sec">
-                <h3>会话</h3>
-                {last?.sessionId === undefined ? (
-                  <p className="d-empty">这个任务还没跑过，还没有会话。</p>
-                ) : (
-                  <>
-                    <div className="d-kv">
-                      <div className="row"><span className="k">会话</span><span className="v mono">{last.sessionId}</span></div>
-                      <div className="row"><span className="k">开始</span><span className="v">{new Date(last.startedAt).toLocaleString()}</span></div>
-                      <div className="row"><span className="k">现状</span><span className="v">{running ? `正在跑，已跑 ${humanDuration(now - last.startedAt)}` : `${outcomeLabel(last)} · 耗时 ${humanDuration(durationOf(last, now))}`}</span></div>
-                    </div>
-                    <button type="button" className="btn btn-secondary" style={{ marginTop: 8 }} onClick={openSession}>
-                      {copied ? '会话 id 已复制' : '在宿主里打开这个会话'}
-                    </button>
-                  </>
-                )}
-              </div>
-
-              {last?.sessionId === undefined ? null : (
-                <div className="d-sec" style={{ marginTop: 16 }}>
-                  {canEmbed ? (
-                    <EmbeddedConversation
-                      ctx={ctx}
-                      sessionId={last.sessionId}
-                      kit={kit}
-                      available={canEmbed}
-                      fallback={why => (
-                        <>
-                          <div className="d-sec-head">
-                            <h3>这次跑了什么</h3>
-                            <span className="view-note" style={{ marginLeft: 'auto' }}>只读，不是宿主的会话页</span>
-                          </div>
-                          {/* 嵌不进来说清为什么，别让人以为是我们不想做 */}
-                          <p className="view-note" style={{ marginBottom: 8 }}>{why}，下面是本插件自己读的只读记录。</p>
-                          <TranscriptView transcript={transcript} />
-                        </>
-                      )}
-                    />
-                  ) : (
-                    <>
+              {/*
+                这一整块不再有「会话 id / 开始 / 现状」那三行 —— 它们进了标题上的气泡。
+                留着的话，每开一次抽屉都要先划过一段静态事实才够得到聊天区，
+                而这个抽屉存在的理由正是把聊天区放大。
+              */}
+              {openId === undefined ? (
+                <p className="d-empty" style={{ padding: '14px 16px' }}>这个任务还没跑过，还没有会话。</p>
+              ) : canEmbed ? (
+                <EmbeddedConversation
+                  ctx={ctx}
+                  sessionId={openId}
+                  kit={kit}
+                  available={canEmbed}
+                  fallback={why => (
+                    <div className="d-sec">
                       <div className="d-sec-head">
                         <h3>这次跑了什么</h3>
                         <span className="view-note" style={{ marginLeft: 'auto' }}>只读，不是宿主的会话页</span>
                       </div>
-                      <p className="view-note" style={{ marginBottom: 8 }}>
-                        这个部署没给到渲染会话页需要的东西（座位的 kit props），下面是本插件自己读的只读记录。
-                      </p>
+                      {/* 嵌不进来说清为什么，别让人以为是我们不想做 */}
+                      <p className="view-note" style={{ marginBottom: 8 }}>{why}，下面是本插件自己读的只读记录。</p>
                       <TranscriptView transcript={transcript} />
-                    </>
+                    </div>
                   )}
+                />
+              ) : (
+                <div className="d-sec">
+                  <div className="d-sec-head">
+                    <h3>这次跑了什么</h3>
+                    <span className="view-note" style={{ marginLeft: 'auto' }}>只读，不是宿主的会话页</span>
+                  </div>
+                  <p className="view-note" style={{ marginBottom: 8 }}>
+                    这个部署没给到渲染会话页需要的东西（座位的 kit props），下面是本插件自己读的只读记录。
+                  </p>
+                  <TranscriptView transcript={transcript} />
                 </div>
               )}
             </div>
@@ -281,9 +331,7 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
                 </div>
               </div>
 
-              {task.schedule !== undefined ? (
-                <ScheduleSection schedule={task.schedule} />
-              ) : null}
+              <ScheduleSection task={task} canWrite={canSchedule} onChanged={onScheduled} />
             </>
           ) : null}
 
@@ -530,7 +578,7 @@ function IntentPane({ task, intent, enrichment, transcriptText }: { task: TaskRe
   )
 }
 
-/** 常见的五种 cron 写法，用作「只读控件」里的预设。 */
+/** 常见的五种 cron 写法。预设只是常用写法，不是全部 —— 认不出的一律留给手填。 */
 const CRON_PRESETS: ReadonlyArray<{ label: string; cron: string }> = [
   { label: '每小时', cron: '0 * * * *' },
   { label: '每天 9 点', cron: '0 9 * * *' },
@@ -540,21 +588,64 @@ const CRON_PRESETS: ReadonlyArray<{ label: string; cron: string }> = [
 ]
 
 /**
- * 排期。
+ * 排期。**这一块是真能改的**，不是摆一排点不动的控件。
  *
- * 主视图是三行只读事实（状态 / 下次 / 上次触发）。底下那个「看只读控件」
- * 展开出来的**是真的禁用控件，不是画几张图糊弄**：
- *   - 开关、预设按钮、cron 输入框全部 `disabled`，点不动
- *   - 每条都带 `title` 说清为什么动不了
+ * 改的动作走任务看板自己的同源 action 通道（见 `write.ts` 里 `writeSchedule`
+ * 上面那段：看板交给第三方扩展的能力面上没有排期，只有那条通道有）。所以
+ * 「改了能不能成」由看板说了算，我们**不做本地预判** —— 它拒绝时把它自己的
+ * 原话显示出来，它对那条规则知道得比我们多。
  *
- * 为什么要摆一排点不动的东西：用户看到「每天 9 点」，下一个念头就是「我想改成
- * 10 点」。给他一个真能按的开关然后再弹窗说「不行」，比一开始就灰着更气人。
- * 把改不了这件事**在控件本身上**说清楚，他才知道该去哪儿改。
+ * 这里也**不做乐观更新**：改完等看板的新快照回来，界面自然跟着变。自己先改一下
+ * 再被事实推翻，看起来就像插件在抽风（跟看板拖拽同一个道理）。
  */
-function ScheduleSection({ schedule }: { schedule: NonNullable<TaskRecord['schedule']> }) {
-  const [open, setOpen] = useState(false)
-  const why = '这一版是只读的：改排期要写账本，而写只能走任务看板的公开契约'
-  const matchesPreset = CRON_PRESETS.find(item => item.cron === schedule.cron)
+function ScheduleSection({ task, canWrite, onChanged }: {
+  task: TaskRecord
+  /** 能不能写。不能时控件全灰，原因写在每一件的 title 上。 */
+  canWrite: boolean
+  /** 改成功之后叫一声，让外层弹 toast。 */
+  onChanged: (message: string) => void
+}) {
+  const schedule = task.schedule
+  const [draft, setDraft] = useState(() => (schedule !== undefined && modeOf(schedule) === 'cron' ? schedule.cron ?? '' : ''))
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const submit = async (patch: SchedulePatch): Promise<void> => {
+    setBusy(true)
+    setError(null)
+    const result = await writeSchedule(task.id, patch)
+    setBusy(false)
+    if (!result.ok) {
+      setError(result.error)
+      return
+    }
+    onChanged(`「${task.title}」的排期改好了`)
+  }
+
+  // 没排期的卡也能**开一条**出来 —— 「这个任务我想让它每天跑」是很自然的下一个念头，
+  // 以前要去任务看板里才能做到
+  if (schedule === undefined) {
+    return (
+      <div className="d-sec">
+        <h3>排期</h3>
+        <p className="d-empty" style={{ marginBottom: 10 }}>这张卡还没有排期，到点不会自己跑。</p>
+        <ScheduleControls
+          busy={busy}
+          canWrite={canWrite}
+          error={error}
+          currentCron={undefined}
+          draft={draft}
+          onDraft={setDraft}
+          enabled={false}
+          onSubmit={patch => void submit(patch)}
+        />
+      </div>
+    )
+  }
+
+  const plan = planOf(schedule)
+  const stop = stopReasonOf(schedule.endedReason)
+  const skipped = stopReasonOf(schedule.skippedReason)
 
   return (
     <div className="d-sec">
@@ -564,7 +655,7 @@ function ScheduleSection({ schedule }: { schedule: NonNullable<TaskRecord['sched
           <span className="k">状态</span>
           <span className="v" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
             <IconClock filled={schedule.enabled} />
-            {schedule.enabled ? '已启用' : '未启用'} · {humanCron(schedule.cron)}
+            {schedule.enabled ? '已启用' : '未启用'} · {plan}
             {schedule.timeZone !== undefined ? ` · ${schedule.timeZone}` : ''}
           </span>
         </div>
@@ -576,54 +667,118 @@ function ScheduleSection({ schedule }: { schedule: NonNullable<TaskRecord['sched
           <span className="k">上次触发</span>
           <span className="v">{schedule.lastTriggeredAt === undefined ? '还没有触发过' : new Date(schedule.lastTriggeredAt).toLocaleString()}</span>
         </div>
+        <div className="row">
+          <span className="k">已跑</span>
+          <span className="v">{runBudgetOf(schedule)}{modeOf(schedule) === 'once' ? '' : '（手动跑的另算）'}</span>
+        </div>
+        {stop === undefined ? null : <div className="row"><span className="k">已停</span><span className="v">{stop}</span></div>}
+        {skipped === undefined ? null : (
+          <div className="row">
+            <span className="k">跳过</span>
+            <span className="v" style={{ color: 'var(--warn-fg)' }}>{skipped}</span>
+          </div>
+        )}
       </div>
 
-      <button type="button" className="sched-toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}>
-        <span className={`caret${open ? ' open' : ''}`} aria-hidden="true">▸</span>
-        {open ? '收起只读控件' : '看只读控件'}
-      </button>
+      <ScheduleControls
+        busy={busy}
+        canWrite={canWrite}
+        error={error}
+        currentCron={modeOf(schedule) === 'cron' ? schedule.cron : undefined}
+        draft={draft}
+        onDraft={setDraft}
+        enabled={schedule.enabled}
+        onSubmit={patch => void submit(patch)}
+      />
+    </div>
+  )
+}
 
-      {open ? (
-        <div className="sched-ro" aria-label="排期控件（只读）">
-          <div className="sro-row">
-            <span className="k">启用</span>
-            <label className="switch is-ro" title={why}>
-              <input type="checkbox" checked={schedule.enabled} disabled readOnly />
-              <span className="track" aria-hidden="true" />
-              <span className="txt">{schedule.enabled ? '开' : '关'}</span>
-            </label>
-          </div>
+/**
+ * 排期的控件本体。**有规则和没规则两种情况下长得一样** —— 分开写两套只会让
+ * 两边慢慢长歪，而它们本来就该是同一排东西。
+ */
+function ScheduleControls({ busy, canWrite, error, currentCron, draft, onDraft, enabled, onSubmit }: {
+  busy: boolean
+  canWrite: boolean
+  error: string | null
+  currentCron: string | undefined
+  draft: string
+  onDraft: (next: string) => void
+  enabled: boolean
+  onSubmit: (patch: SchedulePatch) => void
+}) {
+  const why = '排期要走任务看板自己的写入通道，但现在走不通 —— 去任务看板里直接改'
+  const off = !canWrite || busy
+  const matchesPreset = CRON_PRESETS.find(item => item.cron === currentCron)
+  const dirty = draft.trim().length > 0 && draft.trim() !== currentCron
 
-          <div className="sro-row">
-            <span className="k">预设</span>
-            <span className="sro-presets">
-              {CRON_PRESETS.map(item => (
-                <button
-                  key={item.cron}
-                  type="button"
-                  className={`btn btn-secondary${item.cron === schedule.cron ? ' on' : ''}`}
-                  disabled
-                  title={why}
-                  aria-pressed={item.cron === schedule.cron}
-                >
-                  {item.label}
-                </button>
-              ))}
-            </span>
-          </div>
+  return (
+    <div className="sched-ro" aria-label="排期控件">
+      <div className="sro-row">
+        <span className="k">启用</span>
+        <label
+          className={`switch${canWrite ? '' : ' is-ro'}`}
+          title={canWrite ? (enabled ? '关掉：到点也不会自己跑' : '打开：按下面这个时间自动跑') : why}
+        >
+          <input
+            type="checkbox"
+            checked={enabled}
+            disabled={off}
+            onChange={() => onSubmit({ enabled: !enabled, ...(currentCron === undefined ? {} : { mode: 'cron' as const, cron: currentCron }) })}
+          />
+          <span className="track" aria-hidden="true" />
+          <span className="txt">{busy ? '…' : enabled ? '开' : '关'}</span>
+        </label>
+      </div>
 
-          <div className="sro-row">
-            <span className="k">表达式</span>
-            <input className="sro-cron" value={schedule.cron} disabled readOnly title={why} aria-label="cron 表达式（只读）" />
-            <span className="sro-human">{humanCron(schedule.cron)}</span>
-          </div>
+      <div className="sro-row">
+        <span className="k">预设</span>
+        <span className="sro-presets">
+          {CRON_PRESETS.map(item => (
+            <button
+              key={item.cron}
+              type="button"
+              className={`btn btn-secondary${item.cron === currentCron ? ' on' : ''}`}
+              disabled={off}
+              title={canWrite ? `改成「${item.label}」并启用` : why}
+              aria-pressed={item.cron === currentCron}
+              onClick={() => { onDraft(item.cron); onSubmit({ enabled: true, mode: 'cron', cron: item.cron }) }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </span>
+      </div>
 
-          {matchesPreset === undefined ? (
-            <p className="view-note">这个表达式不在上面五个预设里——预设只是常用写法，不是全部。</p>
-          ) : null}
-          <p className="ro-reason">{why}。</p>
-        </div>
+      <div className="sro-row">
+        <span className="k">表达式</span>
+        <input
+          className="sro-cron"
+          value={draft}
+          disabled={off}
+          placeholder="分 时 日 月 周，例如 0 9 * * *"
+          title={canWrite ? '五段 cron，按「分 时 日 月 周」的顺序写' : why}
+          aria-label="cron 表达式"
+          onChange={event => onDraft(event.target.value)}
+        />
+        <span className="sro-human">{draft.trim().length === 0 ? '' : humanCron(draft.trim())}</span>
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={off || !dirty}
+          title={canWrite ? '把上面这个表达式写进任务看板' : why}
+          onClick={() => onSubmit({ enabled: true, mode: 'cron', cron: draft.trim() })}
+        >
+          应用
+        </button>
+      </div>
+
+      {currentCron !== undefined && matchesPreset === undefined ? (
+        <p className="view-note">这个表达式不在上面五个预设里——预设只是常用写法，不是全部。</p>
       ) : null}
+      {/* 看板拒绝的原话照抄。它比我们清楚是哪一条不合法 */}
+      {error === null ? null : <p className="ro-reason err">没改成：{error}</p>}
     </div>
   )
 }

@@ -13,7 +13,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { deriveIntent, manualSettled, periodOf, priorityOf, ruleRank } from '../derive'
 import { STATUS, STATUS_ORDER, barColor, hueOf } from '../tokens'
 import type { TaskIndex } from '../model'
-import { dayKey, groupByDay, lastExecution, paginateByWorkday, rollupOf, shortTime, spanEnd, triggerOf } from '../model'
+import { dayKey, groupByDay, isSessionTask, lastExecution, paginateByWorkday, planOf, rollupOf, runBudgetOf, shortTime, spanEnd, stopReasonOf, triggerOf } from '../model'
 import type { TaskRecord, TaskStatus } from '../types'
 import type { WorkspaceIndex } from '../workspaces'
 import { Dropdown, EmptyState, IconClock, IconMag, IconMini, MiniSearch, emptyTaskCopy, type Option } from './controls'
@@ -98,6 +98,9 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
       out[status].sort(status === 'done' || status === 'failed'
         ? (a, b) => spanEnd(b, now) - spanEnd(a, now)
         : (a, b) => ruleRank(b) - ruleRank(a) || b.createdAt - a.createdAt)
+      // 会话行**沉到本列最后**。它们是「顺带看看」的东西，一堆会话压在真正的卡上面，
+      // 这一列就不再回答「哪个窗口在等我」了 —— 那正是这个插件存在的理由。
+      out[status].sort((a, b) => Number(isSessionTask(a)) - Number(isSessionTask(b)))
     }
     return out
   }, [index.roots, now])
@@ -122,9 +125,15 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
     return out
   }, [columns, filters])
 
-  /** 一张卡要的全部 props。两处渲染点（平铺 / 按天分组）共用，免得改了这处漏那处。 */
+  /**
+   * 一张卡要的全部 props。两处渲染点（平铺 / 按天分组）共用，免得改了这处漏那处。
+   *
+   * 会话行一律 `canMove: false`：它没有账本可写，拖了也无处可落。
+   * 给 false 时连 `draggable` 都不挂，卡片根本不会出现「可以拖」的手感。
+   */
   const cardProps = (task: TaskRecord) => ({
-    task, index, now, workspaces, selectedId, onSelect, canMove,
+    task, index, now, workspaces, selectedId, onSelect,
+    canMove: canMove && !isSessionTask(task),
     dragging: dragging?.id === task.id,
     onDragBegin: setDragging,
     onDragEnd: () => setDragging(undefined),
@@ -392,25 +401,43 @@ function Card({ task, index, now, workspaces, selectedId, onSelect, canMove, dra
   const tags = task.tags ?? []
   const wsName = workspaces.nameOf(task.workspaceId)
   const unpinned = task.workspaceId === undefined || task.workspaceId.length === 0
+  /**
+   * 会话行：没有账本，也没有执行记录 —— 它自己就是那次会话。
+   *
+   * `index` 里这一行的 id 是 `session:<会话 id>`，跟账本 id 不可能撞；
+   * 抽屉认的也是这个前缀（见 `sessions.ts`）。
+   */
+  const session = task.fromSession !== undefined
 
-  // 这三个都只看账本字段，不看模型 —— 卡片上不能出现「等模型回来才显示」的格子。
+  // 这几个都只看账本字段，不看模型 —— 卡片上不能出现「等模型回来才显示」的格子。
   const priority = useMemo(() => priorityOf(task), [task])
-  const period = useMemo(() => periodOf(task), [task])
-  const manual = useMemo(() => manualSettled(task), [task])
+  const period = useMemo(() => (session ? undefined : periodOf(task)), [task, session])
+  // `manualSettled` 的判据是「结束了却没有执行记录」= 人手工判过的。
+  // 会话行正好符合这个形状，但那不是它的意思 —— 不拍掉的话每张会话卡上
+  // 都会挂一枚「手动结算」，而它根本没结算过
+  const manual = useMemo(() => (session ? undefined : manualSettled(task)), [task, session])
   const goal = useMemo(() => { const i = deriveIntent(task, now); return i.goal }, [task, now])
 
   // 第四行左边那一格：按状态换口径。一个跑着的任务写「创建时间」没有意义，
   // 一个跑完的任务写「开始时间」也不如「结算」有用。
-  const when = running
-    ? { k: '开始', v: shortTime(last!.startedAt, now) }
-    : task.status === 'done' || task.status === 'failed'
-      ? { k: '结算', v: shortTime(spanEnd(task, now), now) }
-      : { k: '创建', v: shortTime(task.createdAt, now) }
+  // 会话行没有开始也没有结算，只有「最后动它是什么时候」。
+  const when = session
+    ? { k: '活动', v: shortTime(task.updatedAt, now) }
+    : running
+      ? { k: '开始', v: shortTime(last!.startedAt, now) }
+      : task.status === 'done' || task.status === 'failed'
+        ? { k: '结算', v: shortTime(spanEnd(task, now), now) }
+        : { k: '创建', v: shortTime(task.createdAt, now) }
 
   const tip = [
     task.title,
-    `${task.id} · ${wsName} · ${STATUS[task.status].label}`,
+    session
+      ? `会话 ${task.fromSession} · ${wsName} · ${STATUS[task.status].label}`
+      : `${task.id} · ${wsName} · ${STATUS[task.status].label}`,
     task.description.length > 0 ? task.description : undefined,
+    session
+      ? '这一行是没有任务卡的会话，按它在不在跑归列。点开可以直接接着聊'
+      : undefined,
     // 说在动手之前。跑到一半的卡移不动是看板的规矩，等拖完再弹一句「不行」
     // 是把一句话该在前面的信息放到了后面
     canMove && running ? '跑着的时候移不动：锁属于那次执行，不属于这一列的名字' : undefined,
@@ -419,7 +446,7 @@ function Card({ task, index, now, workspaces, selectedId, onSelect, canMove, dra
 
   return (
     <article
-      className={`card${running ? ' is-running' : ''}${task.id === selectedId ? ' on' : ''}${dragging ? ' is-dragging' : ''}${canMove ? ' can-move' : ''}`}
+      className={`card${running || task.status === 'running' ? ' is-running' : ''}${session ? ' is-session' : ''}${task.id === selectedId ? ' on' : ''}${dragging ? ' is-dragging' : ''}${canMove ? ' can-move' : ''}`}
       role="button"
       tabIndex={0}
       draggable={canMove}
@@ -452,17 +479,27 @@ function Card({ task, index, now, workspaces, selectedId, onSelect, canMove, dra
 
       <h4>
         {/* 缺目标：执行提示和说明都空着 —— 这种卡跑起来会拿到一个空的 prompt。
-            原型里是个小黄点，这里照做，提示词写清为什么。 */}
-        {goal.value === '' ? (
+            原型里是个小黄点，这里照做，提示词写清为什么。
+            会话行没有 prompt 是**本该如此**，不是缺了什么，不点这个灯。 */}
+        {!session && goal.value === '' ? (
           <span className="nogol" title="这张卡没有填执行提示，也没有说明 —— 跑起来发给 DSH 的是空的" aria-label="缺目标" />
         ) : null}
         <span className="ttl">{task.title}</span>
       </h4>
 
       <div className="card-tags">
-        <span className={`prio p-${priority.level}`} title={`优先级：${priority.value} · ${priority.why}`}>
-          {priority.value}
-        </span>
+        {session ? (
+          <span
+            className="badge-session"
+            title="这不是任务看板里的卡，是一个没有挂卡的会话。它按「在跑 / 停着」归列，也改不了"
+          >
+            会话
+          </span>
+        ) : (
+          <span className={`prio p-${priority.level}`} title={`优先级：${priority.value} · ${priority.why}`}>
+            {priority.value}
+          </span>
+        )}
         {period !== undefined ? (
           <span className="badge-period" title={`${period.label} · ${period.why}`}>{period.label}</span>
         ) : null}
@@ -495,9 +532,14 @@ function Card({ task, index, now, workspaces, selectedId, onSelect, canMove, dra
           {executionSummary(task) ?? ''}
         </span>
         <span className="cseg chip-slot">
-          {last?.sessionId !== undefined ? (
-            <span className="chip" title={`最近一次执行会话 ${last.sessionId}`}>
-              {shortSession(last.sessionId)}
+          {/* 会话行把**它自己**那个会话 id 摆在这儿 —— 卡上第二行本来就是放会话 chip 的
+              位置，空着的话这一行整条是白的，看起来像没读到的数据 */}
+          {(session ? task.fromSession : last?.sessionId) !== undefined ? (
+            <span
+              className="chip"
+              title={session ? `这个会话：${task.fromSession}` : `最近一次执行会话 ${last!.sessionId}`}
+            >
+              {shortSession((session ? task.fromSession : last!.sessionId)!)}
             </span>
           ) : null}
         </span>
@@ -525,19 +567,32 @@ function shortSession(sessionId: string): string {
   return sessionId.length <= 14 ? sessionId : `${sessionId.slice(0, 13)}…`
 }
 
-/** 第四行右边：排期。启用了写下次触发时间，没启用只留一个空心钟。 */
+/**
+ * 第四行右边：排期。启用了写下次触发时间，没启用只留一个空心钟。
+ *
+ * 说的是**规则本身**（`planOf`），不直接读 `schedule.cron` —— 单次规则没有这个字段，
+ * 读出来的是 undefined，气泡里就是「定时未启用 · undefined」。
+ */
 function scheduleMark(task: TaskRecord, now: number) {
   if (task.schedule === undefined) return null
-  const { enabled, cron, nextRunAt } = task.schedule
+  const { enabled, nextRunAt } = task.schedule
+  const plan = planOf(task.schedule)
+  const extra = [
+    runBudgetOf(task.schedule),
+    enabled && nextRunAt !== undefined ? `下次 ${new Date(nextRunAt).toLocaleString()}` : undefined,
+    enabled ? undefined : '关着：到点也不会跑，只能人手动开',
+    stopReasonOf(task.schedule.endedReason),
+    stopReasonOf(task.schedule.skippedReason),
+  ].filter((part): part is string => part !== undefined)
   if (!enabled) {
     return (
-      <span className="sched" title={`定时未启用 · ${cron}`} style={{ color: 'var(--label-tertiary)' }}>
+      <span className="sched" title={[`定时未启用 · ${plan}`, ...extra].join('\n')} style={{ color: 'var(--label-tertiary)' }}>
         <IconClock filled={false} />
       </span>
     )
   }
   return (
-    <span className="sched" title={`定时已启用 · ${cron}${nextRunAt === undefined ? '' : ` · 下次 ${new Date(nextRunAt).toLocaleString()}`}`}>
+    <span className="sched" title={[`定时已启用 · ${plan}`, ...extra].join('\n')}>
       <IconClock filled />
       <span>{nextRunAt === undefined ? '已启用' : shortTime(nextRunAt, now)}</span>
     </span>

@@ -39,14 +39,44 @@ export interface ExecutionRecord {
   ownResult?: ExecutionOutcome
 }
 
-/** 一条定时规则。 */
+/** 排期的两种形态。 */
+export type ScheduleMode = 'cron' | 'once'
+
+/**
+ * 一条定时规则。
+ *
+ * **`mode` 是必须看的**：规则可能是「重复」（带 cron）也可能是「单次」（带 at），
+ * 两者的字段不是同一套。以前这份类型只有 `cron: string`，于是单次规则一读进来
+ * `cron` 就是 undefined，界面上出现「定时未启用 · undefined」和一条崩掉的推导 ——
+ * 账本 v6 加了 `mode`，这里跟着补齐。
+ */
 export interface ScheduleRule {
   enabled: boolean
-  /** 5 段 cron：分 时 日 月 周。 */
-  cron: string
+  /**
+   * **可能没有** —— 账本 v6 之前写下的规则不带这个字段。
+   *
+   * 任务看板自己读账本时会把它补成 `cron`，但它补的是**自己那一层**；
+   * 我们退回读 `ledger-v2.json` 快照时看到的是补之前的原文。
+   * 所以判断形态一律走 `modeOf()`，不要直接读这个字段。
+   */
+  mode?: ScheduleMode
+  /** 5 段 cron：分 时 日 月 周。**只有 `mode==='cron'` 有。** */
+  cron?: string
+  /** 单次触发的时刻。**只有 `mode==='once'` 有**，跑完也留着给人看。 */
+  at?: number
   timeZone?: string
   nextRunAt: number | undefined
   lastTriggeredAt: number | undefined
+  /** 定时触发真正开起来的执行次数。手动跑的**不**计进这里。 */
+  runCount: number
+  /** 重复规则的次数上限；没有就是不限。单次规则不存这个字段。 */
+  maxRuns?: number
+  /** 规则自己停下来的时刻，以及为什么停。 */
+  endedAt?: number
+  endedReason?: string
+  /** 最近一次到点却没跑起来的时刻，以及为什么（忙 / 权限没确认 / 错过了）。 */
+  skippedAt?: number
+  skippedReason?: string
 }
 
 /** 任务上的一个标签。 */
@@ -85,6 +115,14 @@ export interface TaskRecord {
    * 我们同理，只把 key 列出来告诉用户「有东西挂在这儿」。
    */
   integrations?: Record<string, unknown>
+  /**
+   * **这一行不是账本里的卡**，是「没有任务卡的会话」投影出来的（见 `sessions.ts`）。
+   * 值是那个会话 id —— 抽屉直接拿它嵌宿主的会话页。
+   *
+   * 账本里永远不会有这个字段，所以它同时也是「这张卡能不能改」的判据：
+   * 有它就没有账本可写，拖拽、编辑、排期全部不适用。
+   */
+  fromSession?: string
 }
 
 /** 子任务最多嵌几层——看板自己的上限，我们只用来判断深度。 */

@@ -14,7 +14,7 @@ import { useMemo, useRef, useState } from 'react'
 import { expectedRuns, runsIn } from '../derive'
 import { STATUS, STATUS_ORDER } from '../tokens'
 import type { TaskIndex } from '../model'
-import { dayKey, spanEnd } from '../model'
+import { dayKey, isSessionTask, modeOf, spanEnd } from '../model'
 import type { TaskRecord } from '../types'
 import type { WorkspaceIndex } from '../workspaces'
 import { EmptyState, emptyTaskCopy } from './controls'
@@ -118,19 +118,26 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
     let scheduledOn = 0
     let bigTasks = 0
     let subtasks = 0
+    let sessions = 0
 
     for (const task of index.onBoard) {
       if (task.parentId !== undefined) { subtasks += 1; continue }
-      bigTasks += 1
-      if (task.schedule !== undefined) {
-        scheduled += 1
-        if (task.schedule.enabled) scheduledOn += 1
+      // 「大任务」数的是**账本里的卡**，会话行不算 —— 它没有卡。
+      // 但会话行照常进总数和状态分布，否则它们又变成看不见的了
+      const session = isSessionTask(task)
+      if (session) sessions += 1
+      else {
+        bigTasks += 1
+        if (task.schedule !== undefined) {
+          scheduled += 1
+          if (task.schedule.enabled) scheduledOn += 1
+        }
       }
       if (!inScope(task)) continue
       total += 1
       count[task.status] += 1
     }
-    return { count, total, scheduled, scheduledOn, bigTasks, subtasks }
+    return { count, total, scheduled, scheduledOn, bigTasks, subtasks, sessions }
   }, [index.onBoard, inScope])
 
   /**
@@ -215,17 +222,23 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
             结束日期早于开始日期，下面这些数还是 {dayKey(effective.from)} ~ {dayKey(effective.to)} 的
           </span>
         ) : null}
+        {/*
+          这一页的口径（数的是卡还是会话、区间筛谁不筛谁）原来是正文里的一段字。
+          它是**被问出来的**，不是被读出来的 —— 没人对不上数的时候根本不会看它。
+          所以挂在一个悬停气泡上：想核的时候一悬停就有，其余时候不占地方。
+        */}
+        <span className="meter" title={[
+          `已完成任务数 ÷ 任务总数`,
+          `统计范围 ${dayKey(effective.from)} ~ ${dayKey(effective.to)}`,
+          '日期区间只筛已经结束的任务；还开着的（待规划 / 待办 / 进行中）永远计入',
+          '定时 / 大任务 / 子任务分别统计，三者互不相同、也不相加',
+          '',
+          '数的是任务卡和「没有卡的会话」，不是会话次数：一张卡可以跑很多次，每次一个会话。',
+          '同一张卡不会因为跑了十次就被数十遍。',
+        ].join('\n')}>
+          口径
+        </span>
       </div>
-
-      <p className="view-note">
-        口径：已完成任务数 ÷ 总任务数 · 统计范围 {dayKey(effective.from)} ~ {dayKey(effective.to)} ·
-        时间范围只筛已经结束的任务，还开着的（待规划 / 待办 / 进行中）永远计入 · 定时 / 大任务 / 子任务分别统计
-        <br />
-        {/* 这一句是**必须**的：这一页数的是任务卡，跟「开了几个会话」不是一回事 ——
-            一张卡可以跑很多次（每次一个会话），随手聊的会话也根本不挂卡。
-            不写清楚，两边一对不上就会以为插件数错了。 */}
-        这里数的是**任务卡**，不是会话：一张卡可以跑很多次，每跑一次是一个会话；随手开的会话也不一定有卡。
-      </p>
 
       {stats.total === 0 ? (
         <div className="p-range-empty">这个日期区间里没有已经结束的任务。还开着的任务不会被区间筛掉，放宽一下止日试试。</div>
@@ -262,13 +275,17 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
                 <b>{stats.scheduled}</b>
                 {stats.scheduled > 0 ? <span className="sub">{stats.scheduledOn} 启用</span> : null}
               </span>
-              <span className="bk" title="大任务＝不带父任务的顶层任务">
+              <span className="bk" title="大任务＝账本里不带父任务的顶层卡（不含没有卡的会话）">
                 <span className="k">大任务</span>
                 <b>{stats.bigTasks}</b>
               </span>
               <span className="bk" title="子任务＝挂在大任务下面的任务">
                 <span className="k">子任务</span>
                 <b>{stats.subtasks}</b>
+              </span>
+              <span className="bk" title="没有任务卡的会话：它们也在上面的「任务总数」里，按在跑 / 停着分到「进行中」和「已完成」">
+                <span className="k">会话</span>
+                <b>{stats.sessions}</b>
               </span>
             </div>
           </div>
@@ -277,11 +294,14 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
 
       <div className="panel p-goal">
         <div className="p-goal-hd">
-          <h3>本期跑动</h3>
-          <span className="hint view-note">
-            不随上面的日期范围变。<b>目标不是谁设的</b>——它由已启用的定时规则算出来：
-            「每天跑一次」就等于这一周该跑 7 次。没排期的、以及一天跑不止一次的，都没有目标，只看实跑。
-          </span>
+          {/* 这两句是「目标」这个数的口径，不是内容。原来摆在标题右边占一整行 */}
+          <h3 title={[
+            '不随上面的日期范围变：这一块永远是本周 / 本月。',
+            '目标不是谁设的 —— 它由已启用的定时规则算出来：「每天跑一次」就等于这一周该跑 7 次。',
+            '没排期的、以及一天跑不止一次的，都没有目标，只看实跑。',
+          ].join('\n')}>
+            本期跑动
+          </h3>
         </div>
         <div className="pg-wrap">
           <PeriodRow label="本周" range={period.week.range} data={period.week} />
@@ -298,9 +318,11 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
       </div>
 
       <div>
-        <p className="p-secttl">按工作区 · 每个工作区一张卡</p>
-        <p className="view-note" style={{ marginTop: 4 }}>
-          空工作区也留一张卡（这张卡上的数跟上面同一套口径，加起来正好等于「任务总数」）。
+        <p
+          className="p-secttl"
+          title={'空工作区也留一张卡（这张卡上的数跟上面同一套口径，加起来正好等于「任务总数」）。'}
+        >
+          按工作区 · 每个工作区一张卡
         </p>
         <div className="p-grid" style={{ marginTop: 8 }}>
           {byWorkspace.map(([id, bucket]) => (
@@ -392,12 +414,17 @@ function buildPeriod(
     if (schedule !== undefined && schedule.enabled) {
       // 这一期还没过完，所以只算到「现在」为止 —— 拿整周的目标去比半周的实际，
       // 每天都显示「还差 4 次」是纯粹的噪音
-      const weekExpect = expectedRuns(schedule.cron, weekStart, now)
-      const monthExpect = expectedRuns(schedule.cron, monthStart, now)
-      if (weekExpect === undefined || monthExpect === undefined) unschedulable += 1
-      else {
-        week.expected += weekExpect
-        month.expected += monthExpect
+      //
+      // 单次规则（mode==='once'）没有 cron，算不出「这一期该跑几次」——
+      // 它不是认不出的表达式，是被**特意排除**的，所以不算进 unschedulable
+      if (modeOf(schedule) === 'cron' && schedule.cron !== undefined) {
+        const weekExpect = expectedRuns(schedule.cron, weekStart, now)
+        const monthExpect = expectedRuns(schedule.cron, monthStart, now)
+        if (weekExpect === undefined || monthExpect === undefined) unschedulable += 1
+        else {
+          week.expected += weekExpect
+          month.expected += monthExpect
+        }
       }
     }
 
@@ -441,6 +468,10 @@ interface WorkspaceCardProps {
 function WorkspaceCard({ id, bucket, workspaces, now }: WorkspaceCardProps) {
   const { main, scoped, subtasks } = bucket
   const unpinned = id === ''
+  // 「大任务」和「定时」跟总览同一套口径：**只数账本里的卡**，会话行不算
+  // （它没有卡）。两个地方口径不一致的话，各卡加起来就跟上面的总数对不上，
+  // 那一页的数字就整个不能信了 —— 这个错犯过一次。
+  const big = main.filter(task => !isSessionTask(task)).length
   const scheduled = main.filter(task => task.schedule !== undefined).length
   const scheduledOn = main.filter(task => task.schedule?.enabled === true).length
   // 环、完成率、任务数都看**进了统计的那一份**；「大任务 / 定时」跟总览一样
@@ -466,8 +497,10 @@ function WorkspaceCard({ id, bucket, workspaces, now }: WorkspaceCardProps) {
   let expected = 0
   let computable = true
   for (const task of main) {
-    if (task.schedule === undefined || !task.schedule.enabled) continue
-    const want = expectedRuns(task.schedule.cron, weekStart, now)
+    const schedule = task.schedule
+    if (schedule === undefined || !schedule.enabled) continue
+    if (modeOf(schedule) !== 'cron' || schedule.cron === undefined) continue
+    const want = expectedRuns(schedule.cron, weekStart, now)
     if (want === undefined) computable = false
     else expected += want
   }
@@ -531,9 +564,9 @@ function WorkspaceCard({ id, bucket, workspaces, now }: WorkspaceCardProps) {
           <b>{scheduled}</b>
           {scheduledOn > 0 ? <span className="sub">{scheduledOn} 启用</span> : null}
         </span>
-        <span className="bk" title="大任务＝不带父任务的顶层任务。不按上面的日期范围筛">
+        <span className="bk" title="大任务＝账本里不带父任务的顶层卡（不含没有卡的会话）。不按上面的日期范围筛">
           <span className="k">大任务</span>
-          <b>{main.length}</b>
+          <b>{big}</b>
         </span>
         <span className="bk" title="子任务＝挂在大任务下面的任务，单独统计、不进总数">
           <span className="k">子任务</span>

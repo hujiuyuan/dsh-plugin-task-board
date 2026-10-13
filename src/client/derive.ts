@@ -27,7 +27,7 @@
  * 由用户在界面上决定信不信。
  */
 import type { ExecutionRecord, TaskRecord } from './types'
-import { humanCron, humanDuration, isRunning, lastExecution, outcomeLabel, spanEnd, triggerOf } from './model'
+import { humanDuration, isRunning, lastExecution, modeOf, outcomeLabel, planOf, spanEnd, triggerOf } from './model'
 
 /** 这个值是从哪来的。 */
 export type FieldSource = 'raw' | 'derived' | 'ai' | 'edited'
@@ -183,18 +183,18 @@ function scenarioField(task: TaskRecord): Field {
   const kinds = new Set(task.executions.map(triggerOf))
 
   if (task.schedule !== undefined) {
-    const when = humanCron(task.schedule.cron)
+    const when = planOf(task.schedule)
     if (task.schedule.enabled) {
       return {
         value: `按「${when}」自动触发${kinds.has('manual') ? '，也可以随时手动跑一次' : ''}`,
         source: 'derived',
-        why: `账本里的定时规则：${task.schedule.cron}`,
+        why: `账本里的定时规则：${when}`,
       }
     }
     return {
       value: `定时规则写着「${when}」，但**没启用**——现在只能人手动跑`,
       source: 'derived',
-      why: `账本里的定时规则：${task.schedule.cron}（enabled=false）`,
+      why: `账本里的定时规则：${when}（enabled=false）`,
     }
   }
 
@@ -372,10 +372,16 @@ export function manualSettled(task: TaskRecord): string | undefined {
   return undefined
 }
 
-/** 原型里的「周目标 / 月目标」。真实数据里只有 cron，所以由 cron 的频率反推。 */
+/**
+ * 卡片上那枚「每天 / 每周」的周期小标，由排期的频率反推。
+ *
+ * 单次规则**没有周期**，所以返回 undefined —— 它不该挂「每周」这种标。
+ * （`schedule.cron` 在单次规则上是 undefined，直接 trim 会抛。）
+ */
 export function periodOf(task: TaskRecord): { label: string; why: string } | undefined {
   const schedule = task.schedule
   if (schedule === undefined || !schedule.enabled) return undefined
+  if (modeOf(schedule) !== 'cron' || schedule.cron === undefined) return undefined
   const fields = schedule.cron.trim().split(/\s+/)
   if (fields.length !== 5) return undefined
   const [minute, hour, dayOfMonth, month, dayOfWeek] = fields

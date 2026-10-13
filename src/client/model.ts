@@ -4,7 +4,17 @@
  * 分开写的理由是三个视图问的是**同一批问题**的不同侧面（这个任务在哪个列、它下面有几个
  * 子任务、它最后一次跑是什么时候），三个地方各算一遍迟早会算出三个不同的答案。
  */
-import type { ExecutionRecord, TaskRecord, TaskStatus } from './types'
+import type { ExecutionRecord, ScheduleMode, ScheduleRule, TaskRecord, TaskStatus } from './types'
+
+/**
+ * 这一行是**没有任务卡的会话**投影出来的，不是账本里的卡。
+ *
+ * 放在这一层而不是 `sessions.ts`：三个视图都要问这个问题，而 `sessions.ts`
+ * 带着 React（它是一个 hook 模块）。纯函数层不该为了一个谓词把 React 拖进来。
+ */
+export function isSessionTask(task: TaskRecord): boolean {
+  return task.fromSession !== undefined
+}
 
 /** 主任务 + 按创建时间排好的直接子任务。 */
 export interface TaskIndex {
@@ -256,6 +266,53 @@ export function shortTime(ms: number, now: number): string {
     return `${date.getMonth() + 1}/${date.getDate()} ${hh}:${mm}`
   }
   return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()} ${hh}:${mm}`
+}
+
+/**
+ * 一条规则的形态。
+ *
+ * **缺省当 `cron`** —— 这是任务看板自己的归一化规则：v6 之前写下的规则没有
+ * `mode` 字段，它读账本时会补成 `cron`。但它补的是自己那一层，我们退回读
+ * `ledger-v2.json` 快照时看到的是补之前的原文。不补这一下，一条好好的
+ * 「每天 9 点」会被当成「没有排期」—— 界面上凭空少掉一个目标，而且不报错。
+ */
+export function modeOf(schedule: ScheduleRule): ScheduleMode {
+  return schedule.mode === 'once' ? 'once' : 'cron'
+}
+
+/**
+ * 一条排期的口语化说法，**两种形态都认**。
+ *
+ * 规则的形态决定字段：`cron` 带 `cron`，`once` 带 `at`。所以「这个任务什么时候
+ * 跑」这句话必须从这里拿，不能各处自己读 `schedule.cron` —— 单次规则上读出来的
+ * 是 undefined，界面上就是「定时未启用 · undefined」，比不显示更糟。
+ */
+export function planOf(schedule: ScheduleRule): string {
+  if (modeOf(schedule) === 'once') {
+    return schedule.at === undefined ? '只跑一次（没定时间）' : `只跑一次 · ${new Date(schedule.at).toLocaleString()}`
+  }
+  return schedule.cron === undefined ? '重复（没写表达式）' : humanCron(schedule.cron)
+}
+
+/** 排期跑了几次 / 一共允许跑几次。上限没设就是「不限」。 */
+export function runBudgetOf(schedule: ScheduleRule): string {
+  const done = schedule.runCount ?? 0
+  if (modeOf(schedule) === 'once') return `${done} / 1 次`
+  return schedule.maxRuns === undefined ? `已跑 ${done} 次 · 不限次数` : `${done} / ${schedule.maxRuns} 次`
+}
+
+/** 规则自己停下来的原因，翻成人话；没停返回 undefined。 */
+export function stopReasonOf(reason: string | undefined): string | undefined {
+  switch (reason) {
+    case 'fired': return '这一次已经跑完了'
+    case 'limit': return '跑满了设定的次数'
+    case 'no-target': return '这个表达式再也算不出下一个时刻'
+    case 'missed': return '到点的时候看板没在跑，错过了'
+    case 'busy': return '到点的时候上一次还没跑完'
+    case 'permission': return '到点时权限还没确认'
+    case 'launch-failed': return '这一次没能开起来'
+    default: return undefined
+  }
 }
 
 /** cron 里的 `*​/N` 写法：是不是「每 N 个单位」。 */

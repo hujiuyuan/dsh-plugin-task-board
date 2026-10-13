@@ -377,6 +377,25 @@ body[data-ds-dark-theme] .dsptb .seg button[aria-pressed="true"]{background:var(
   color:var(--label-secondary);background:var(--bg-layer-3);
   border:1px dashed var(--border-l4);
 }
+/* 「会话」角标：这一行不是账本里的卡，是没有挂卡的会话。
+   虚线边框是**故意的** —— 实心边框的角标在这张卡上都是「账本里的一个属性」，
+   而这一个说的是「这张卡本身不是账本里的东西」。 */
+.dsptb .badge-session{
+  flex:0 0 auto;font-size:10px;line-height:1;padding:3px 6px;border-radius:5px;
+  color:var(--label-secondary);border:1px dashed var(--border-l3);
+}
+.dsptb .card.is-session{background:var(--bg-layer-2)}
+.dsptb .card.is-session:hover{border-color:var(--border-l4)}
+/* 甘特左侧任务名前面那枚「会话」小标 */
+.dsptb .g-sess{
+  flex:0 0 auto;font-size:9px;line-height:1;padding:2px 4px;border-radius:4px;
+  color:var(--label-tertiary);border:1px dashed var(--border-l3);
+}
+/* 排期改失败时那句原话。跟成功时一样占一行，颜色换成「没成」 */
+.dsptb .ro-reason.err{color:var(--state-error)}
+/* 排期控件禁用时看着就是禁用的，不用点下去才知道 */
+.dsptb .sched-ro .switch input[disabled]+.track{opacity:.45}
+.dsptb .sched-ro .switch input[disabled]~.txt{opacity:.6}
 .dsptb .badge-period{
   flex:0 0 auto;font-size:11px;line-height:1;padding:3px 6px;border-radius:5px;
   color:var(--business-primary);border:1px solid var(--business-primary);background:none;
@@ -551,6 +570,15 @@ body[data-ds-dark-theme] .dsptb .g-dates .cell .tick{width:3px;height:3px;border
 .dsptb .p-date .to{font-size:11px;color:var(--label-tertiary)}
 .dsptb .p-date input[type="date"].bad{border-color:var(--warn-border);background:var(--warn-bg);color:var(--warn-fg)}
 .dsptb .p-err{flex:1 1 100%;font-size:12px;color:var(--warn-fg)}
+/* 「口径」这个小标。它是被核的时候才看的东西，所以只占一个字的位置，
+   正文一个字都不放 —— 原来那两段就摆在这儿，每次扫这一页都要先读过它们。 */
+.dsptb .meter{
+  margin-left:auto;flex:0 0 auto;
+  font-size:11px;line-height:1;padding:4px 7px;border-radius:5px;
+  color:var(--label-tertiary);border:1px dashed var(--border-l2);
+  cursor:help;user-select:none;
+}
+.dsptb .meter:hover{color:var(--label-secondary);border-color:var(--border-l3)}
 .dsptb .p-quick{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
 .dsptb .p-quick button{
   height:24px;padding:0 9px;border-radius:999px;font-size:11px;cursor:pointer;
@@ -604,7 +632,7 @@ body[data-ds-dark-theme] .dsptb .mask{position:fixed;inset:0;background:var(--ds
 .dsptb .mask{background:var(--dsw-alias-bg-mask-1)}
 .dsptb .mask.open{opacity:1;pointer-events:auto}
 .dsptb .drawer{
-  position:fixed;top:0;right:0;bottom:0;width:min(760px,92vw);z-index:60;
+  position:fixed;top:0;right:0;bottom:0;width:min(980px,94vw);z-index:60;
   background:var(--bg-layer-1);
   border-left:1px solid var(--border-l2);
   display:flex;flex-direction:column;
@@ -1665,13 +1693,18 @@ body[data-ds-dark-theme] .dsptb .tagpick button[aria-pressed="true"]{color:hsl(v
 /* 被拒绝的那颗提示条换个色。同一个位置、同一句话，红的是「没成」。 */
 .dsptb .toast.err{border-color:var(--state-error);color:var(--state-error)}
 
-/* 内嵌的宿主会话页。高度**必须定死**：宿主那套布局是「消息区 flex:1 + 底部输入框」，
-   不给高度它会把自己压成一条线。定死 + overflow:hidden，抽屉的滚动条就只属于抽屉。 */
+/* 内嵌的宿主会话页。高度**必须由外面给死**：宿主那套布局是「消息区 flex:1 +
+   底部输入框」，不给高度它会把自己压成一条线。所以这里是「把抽屉剩下的高度全吃掉」
+   而不是写一个像素值 —— 写死 560px 的时候，抽屉越高浪费越多，而抽屉存在的理由
+   恰恰是把聊天区放大。flex:1 + min-height:0 让它跟着抽屉一起长。 */
 .dsptb .embed-frame{
-  height:min(560px,58vh);display:flex;flex-direction:column;min-height:0;
+  flex:1 1 auto;min-height:260px;display:flex;flex-direction:column;
   border:1px solid var(--border-l2);border-radius:10px;overflow:hidden;
   background:var(--bg-base);
 }
+/* 会话那一页不套抽屉的内边距：那一圈留白全是从聊天区身上割下来的 */
+.dsptb .d-pane.is-conv{padding:12px 12px 14px;gap:0}
+.dsptb .d-conv>.d-sec{padding:2px 4px 4px}
 
 /* 「会话」那一页正在看的那一次执行，在这一列里标出来 */
 .dsptb .d-ex.on{border-color:var(--brand);background:var(--bg-layer-2)}

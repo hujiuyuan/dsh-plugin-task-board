@@ -92,7 +92,8 @@ export interface Material {
   description: string
   prompt: string
   status: string
-  schedule?: { enabled: boolean; cron: string }
+  /** 排期的**人话**说法（客户端用 `planOf` 转好），不是裸 cron。 */
+  schedule?: { enabled: boolean; plan: string }
   runs: Array<{ result: string; error?: string; minutes: number | null }>
   tags?: string[]
   /**
@@ -119,7 +120,7 @@ export function renderMaterial(material: Material): string {
   if (material.tags !== undefined && material.tags.length > 0) lines.push(`标签：${material.tags.join('、')}`)
 
   if (material.schedule !== undefined) {
-    lines.push(`定时规则：${material.schedule.cron}（${material.schedule.enabled ? '已启用' : '未启用'}）`)
+    lines.push(`定时规则：${material.schedule.plan}（${material.schedule.enabled ? '已启用' : '未启用'}）`)
   }
 
   if (material.runs.length === 0) {

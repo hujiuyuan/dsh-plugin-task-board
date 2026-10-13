@@ -16,9 +16,10 @@ import { buildIndex, lastExecution } from '../model'
 import { STATUS } from '../tokens'
 import type { TaskRecord, TaskStatus } from '../types'
 import type { TaskSource } from '../data'
+import { tasksFromSessions, takenSessionIds, useSessionRows } from '../sessions'
 import { transcriptForModel, useTranscript } from '../session'
 import { useWorkspaces } from '../workspaces'
-import { useBoardWrite } from '../write'
+import { useBoardWrite, useScheduleReady } from '../write'
 import { Board } from './Board'
 import { Drawer } from './Drawer'
 import { Gantt } from './Gantt'
@@ -48,6 +49,7 @@ export function Panel({ ctx, source, kit }: PanelProps) {
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined)
   const [now, setNow] = useState(() => Date.now())
   const [hideSubtasks, setHideSubtasks] = useState(false)
+  const [hideSessions, setHideSessions] = useState(false)
   const [lanes, setLanes] = useState(false)
   /** 甘特/进度自己的筛选被「清空全部」清掉时，靠这个数把它们重置。 */
   const [resetToken, setResetToken] = useState(0)
@@ -61,15 +63,38 @@ export function Panel({ ctx, source, kit }: PanelProps) {
     return () => clearInterval(timer)
   }, [])
 
-  const index = useMemo(() => buildIndex(source.snapshot.tasks), [source.snapshot.tasks])
+  /**
+   * 任务索引 = 账本里的卡 + **没有卡的会话**。
+   *
+   * 分三步是因为它们互相依赖，绕一圈：会话要先知道工作区才能对回工作区 id，
+   * 而工作区清单又要先知道界面上有哪些工作区，后者本来是从任务里来的。
+   * 断法是把账本索引先建出来喂给工作区，再拿工作区去把会话行补全 ——
+   * 顺序反过来会变成「会话的工作区看不见」。
+   */
+  const ledgerIndex = useMemo(() => buildIndex(source.snapshot.tasks), [source.snapshot.tasks])
+  const sessionRows = useSessionRows(ctx)
   const workspaceIds = useMemo(
-    () => [...new Set(index.onBoard.map(task => task.workspaceId ?? ''))],
-    [index.onBoard],
+    () => [...new Set(ledgerIndex.onBoard.map(task => task.workspaceId ?? ''))],
+    [ledgerIndex.onBoard],
   )
-  const workspaces = useWorkspaces(ctx, workspaceIds)
+  const sessionPaths = useMemo(
+    () => [...new Set(sessionRows.map(row => row.cwd ?? '').filter(path => path.length > 0))],
+    [sessionRows],
+  )
+  const workspaces = useWorkspaces(ctx, workspaceIds, sessionPaths)
+
+  const index = useMemo(() => {
+    const taken = takenSessionIds(source.snapshot.tasks)
+    const sessionTasks = tasksFromSessions(sessionRows, taken, workspaces)
+    return sessionTasks.length === 0
+      ? ledgerIndex
+      : buildIndex([...source.snapshot.tasks, ...sessionTasks])
+  }, [ledgerIndex, sessionRows, source.snapshot.tasks, workspaces])
 
   const enrichment = useEnrichment(ctx)
   const write = useBoardWrite()
+  /** 排期那条路跟 `write` 不是一条（见 `write.ts`），所以单独问一次。 */
+  const scheduleReady = useScheduleReady()
 
   // 提示条自己会走。3 秒是量出来的：短于 2 秒读不完一句话，
   // 长于 4 秒就开始挡着下面的东西了
@@ -100,7 +125,10 @@ export function Panel({ ctx, source, kit }: PanelProps) {
    * 只在抽屉开着的时候读 —— `sessions.using` 会把会话 retain 住，
    * 看板页面上十几张卡全都去 retain 一遍是没必要的开销。
    */
-  const lastSessionId = selected === undefined ? undefined : lastExecution(selected)?.sessionId
+  // 会话行没有执行记录 —— 它自己就是那个会话，直接用它自己的 id
+  const lastSessionId = selected === undefined
+    ? undefined
+    : selected.fromSession ?? lastExecution(selected)?.sessionId
   const transcript = useTranscript(ctx, selected === undefined ? undefined : lastSessionId)
 
   const autoEnrich = enrichment.auto
@@ -108,6 +136,9 @@ export function Panel({ ctx, source, kit }: PanelProps) {
   const transcriptText = useMemo(() => transcriptForModel(transcript.lines), [transcript.lines])
   useEffect(() => {
     if (selected === undefined) return
+    // 会话行不是卡，没有账本字段可归纳 —— 问模型它也只会照着标题编一句。
+    // 抽屉里那一页本来就不给会话行显示，这一趟白花钱。
+    if (selected.fromSession !== undefined) return
     // 会话还在读的时候不急着问模型：多等一会儿能带上会话内容，归纳质量差很多。
     // idle/unavailable 说明这个任务根本没有会话，那就直接问。
     if (transcript.state === 'loading') return
@@ -175,6 +206,7 @@ export function Panel({ ctx, source, kit }: PanelProps) {
 
   const clearAll = (): void => {
     setHideSubtasks(false)
+    setHideSessions(false)
     setResetToken(token => token + 1)
   }
 
@@ -244,6 +276,8 @@ export function Panel({ ctx, source, kit }: PanelProps) {
               onClearAll={clearAll}
               hideSubtasks={hideSubtasks}
               onHideSubtasks={setHideSubtasks}
+              hideSessions={hideSessions}
+              onHideSessions={setHideSessions}
               lanes={lanes}
               onLanes={setLanes}
               sourceKind={source.snapshot.kind}
@@ -280,6 +314,8 @@ export function Panel({ ctx, source, kit }: PanelProps) {
           enrichment={enrichment}
           write={write}
           onEdit={() => setForm('edit')}
+          canSchedule={scheduleReady.ready}
+          onScheduled={message => setToast({ text: message, tone: 'ok' })}
           transcript={transcript}
           kit={kit}
           ctx={ctx}
