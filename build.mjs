@@ -13,6 +13,7 @@
  */
 import { build } from 'esbuild'
 import { readFileSync, mkdirSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -28,6 +29,23 @@ if (manifest.version !== pkg.version) {
 }
 
 const PLUGIN_ID = pkg.name
+
+// 先过类型检查，**再**打包。
+//
+// esbuild 只转译不做类型检查，于是有些错它会照单全收、打出一个语法上完全合法的
+// bundle：最坑的一种是 CSS 模板字符串里混进反引号（styles.ts 整个文件就是一个
+// String.raw 模板），字面量被提前收尾，后面的 CSS 被当成 JS 表达式。
+// 结果 —— tsc 报一堆莫名其妙的错，npm run build 却报成功，浏览器半体在运行时
+// 抛异常，而报错现场离真正的源头十万八千里。本地踩过一次。
+try {
+  execFileSync(join(here, 'node_modules', '.bin', 'tsc'), ['--noEmit', '-p', join(here, 'tsconfig.json')], {
+    stdio: 'pipe',
+  })
+} catch (error) {
+  const out = `${error.stdout ?? ''}${error.stderr ?? ''}`.trim()
+  console.error(`[${PLUGIN_ID} build] 类型检查未通过，先修掉再打包：\n${out}`)
+  process.exit(1)
+}
 
 const clientBanner = {
   js: `window.__ModuleLoader__.load({ id: '${PLUGIN_ID}', factory: (require) => { var module = { exports: {} }; var exports = module.exports;`,

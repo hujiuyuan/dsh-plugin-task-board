@@ -414,8 +414,13 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
                   {shown.map((group, groupIndex) => {
                     const key = `${column}:${group.key}`
                     const open = override.get(key) ?? groupIndex === 0
+                    /*
+                     * 这个 div **必须有样式**：`.col-body` 的 8px 间距只作用在
+                     * 它的直接子元素上，而按天分组时卡片全在这个 div 里面 ——
+                     * 不给它 `day-group`，组内就是 0 间距，同一天的卡会粘成一块。
+                     */
                     return (
-                      <div key={group.key}>
+                      <div className="day-group" key={group.key}>
                         <div className={`group-head${open ? ' open' : ''}`}>
                           <button
                             type="button"
