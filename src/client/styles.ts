@@ -361,6 +361,28 @@ body[data-ds-dark-theme] .dsptb .seg button[aria-pressed="true"]{background:var(
 }
 .dsptb .card.is-running{border-color:var(--state-warn)}
 .dsptb .card.is-running:hover{border-color:var(--state-warn)}
+/* 有颜色的是「为什么它还停在这儿」，优先级压过 is-running 那条 ——
+   一条「它在等你批准」比「它开着」重要得多 */
+.dsptb .card.tone{border-color:var(--tone)}
+.dsptb .card.tone:hover{border-color:var(--tone)}
+.dsptb .card.tone{border-width:2px;padding:8px 11px 8px 13px}
+/* 橘红呼吸：**它下面还压着东西**。
+   用渐变过渡而不是硬闪 —— 满屏卡片一起一亮一灭，眼睛受不了，
+   看起来也像报警器坏了。颜色本身在两个色之间来回，亮度不变。 */
+@keyframes dsptb-cascade{
+  0%,100%{border-color:var(--state-error)}
+  50%{border-color:var(--state-warn)}
+}
+.dsptb .card.tone-cascade{
+  animation:dsptb-cascade 2.4s ease-in-out infinite;
+  border-color:var(--state-error);
+}
+.dsptb .card.tone-cascade:hover{animation-play-state:paused}
+/* 系统开着「减弱动态」：动画**整个关掉**，但颜色留着。
+   关成没颜色就等于把这一类藏起来了 —— 而它恰恰是藏得最深的那一种。 */
+@media (prefers-reduced-motion:reduce){
+  .dsptb .card.tone-cascade{animation:none;border-color:var(--state-error)}
+}
 .dsptb .card h4{
   display:flex;align-items:baseline;gap:5px;
   padding-left:18px;

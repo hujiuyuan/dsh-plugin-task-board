@@ -105,6 +105,60 @@ const bad = (name, detail) => {
     patchContent: (taskId, patch) => { boardCalls.push({ op: 'patch', taskId, patch }) },
     setStatus: (taskId, status) => { boardCalls.push({ op: 'status', taskId, status }) },
   }
+  /**
+   * 假的会话事件网关。**这一块是「能不能分清它为什么停下来」的全部地基**：
+   * 宿主把答案记在每一轮的 `turn/end` 事件里，而那个字段不在任何投影里，
+   * 浏览器半体根本拿不到 —— 只能从这儿读。
+   *
+   * 三个会话各摆一种形状：
+   *   s-two  两轮都结束了 → 要取**后**那条（取错就永远显示上一轮的原因）
+   *   s-none 一轮都没跑完   → 没有 turn/end，**不是读失败**
+   *   s-boom page 抛错      → 读失败，要跟「没跑过」分开报
+   */
+  const gatewayCalls = []
+  const factFixtures = {
+    's-two': [
+      { event: { type: 'turn/end', seq: 10, time: 1000, data: { turn: 1, reason: { kind: 'completed' } } } },
+      { event: { type: 'user/message', seq: 11, time: 1100, data: {} } },
+      { event: { type: 'turn/end', seq: 20, time: 2000, data: { turn: 2, reason: { kind: 'error', error: { message: 'insufficient balance', code: 'QUOTA' } } } } },
+    ],
+    's-none': [{ event: { type: 'turn/start', seq: 5, time: 500, data: { turn: 1 } } }],
+    's-ok': [{ event: { type: 'turn/end', seq: 9, time: 900, data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'hook', reason: 'deepseek-account/signed-out' } } } } }],
+  }
+  const fakeGateway = {
+    invoke: async ({ namespace, method, args }) => {
+      gatewayCalls.push({ namespace, method })
+      // 真网关的原话。**替身必须照抄这一条**：不然「该走 stream 却走了 invoke」
+      // 这个错在单测里是静默的
+      if (method === 'follow') throw new Error("typert gateway: session/follow: stream Remote methods must be opened through the stream carrier")
+      if (method !== 'page') throw new Error(`意外的网关方法 ${method}`)
+      const id = args.request.address.sessionId
+      if (id === 's-boom') throw new Error('读事件炸了')
+      if (id === '__follow_only__') throw new Error('不该走 invoke，follow 是流')
+      return { records: factFixtures[id] ?? [], hasMore: false }
+    },
+    /**
+     * **`stream` 是 async 的** —— 真网关返回的是 `Promise<AsyncIterable>`。
+     * 这里早先写成了同步返回，于是「忘了 await」这个 bug 在单测里看不出来，
+     * 一直到本地真机加载才炸：`session/follow: stream Remote methods must be
+     * opened through the stream carrier`。假替身跟真东西的形状对不上，
+     * 验出来的就是假的绿。
+     */
+    stream: async ({ namespace, method, args }) => {
+      gatewayCalls.push({ namespace, method })
+      const id = args.request.address.sessionId
+      const frame = id === 's-boom'
+        ? { type: 'snapshot', cursor: 7, records: [], hasMore: false }
+        : { type: 'snapshot', cursor: 20, records: [], hasMore: false }
+      return (async function* () {
+        yield frame
+        // 流必须被关掉 —— 这里 yield 第二次，如果调用方没 return() 就会读到它，
+        // 拿到一个「不是快照」的帧，于是那次读会退化成「没跑过」
+        yield { type: 'update', records: [] }
+      })()
+    },
+  }
+
   let registered
   const board = {
     registerExtension: extension => { registered = extension; extension.start?.({ tasks: boardFace }); return () => { extension.stop?.() } },
@@ -121,22 +175,25 @@ const bad = (name, detail) => {
     inject: (names, callback) => callback({
       webServer: { register: route => { routes.set(route.path, route); return () => {} } },
       logger: { warn: message => warnings.push(message) },
-      get: name => (name === 'taskBoard' ? board : name === 'llm' ? fakeLlm : undefined),
+      get: name => (name === 'taskBoard' ? board : name === 'llm' ? fakeLlm : name === 'typertGateway' ? fakeGateway : undefined),
       llm: names.includes('llm') ? fakeLlm : undefined,
     }),
-    get: name => (name === 'taskBoard' ? board : name === 'llm' ? fakeLlm : undefined),
+    get: name => (name === 'taskBoard' ? board : name === 'llm' ? fakeLlm : name === 'typertGateway' ? fakeGateway : undefined),
   }
   const dispose = mod.apply(ctx)
-  for (const [name, path] of [['health', mod.HEALTH_PATH], ['ledger', mod.LEDGER_PATH], ['enrich', mod.ENRICH_PATH], ['overrides', mod.OVERRIDES_PATH]]) {
+  for (const [name, path] of [['health', mod.HEALTH_PATH], ['ledger', mod.LEDGER_PATH], ['enrich', mod.ENRICH_PATH], ['overrides', mod.OVERRIDES_PATH], ['session-facts', mod.SESSION_FACTS_PATH], ['session-archive', mod.SESSION_ARCHIVE_PATH]]) {
     if (!routes.has(path)) bad(`host: 注册了 ${name} 路由`, [...routes.keys()].join(', '))
     else ok(`host: 注册了 ${name} 路由`)
   }
 
-  const call = async (path, { method = 'GET', body } = {}) => {
+  const call = async (spec, { method = 'GET', body } = {}) => {
+    // 路由按**路径**注册，查询串是 handler 自己从 `req.url` 里读的
+    const path = spec.split('?')[0]
     let text = ''
     let status = 0
     const req = {
       method,
+      url: spec,
       async *[Symbol.asyncIterator]() {
         if (body !== undefined) yield Buffer.from(JSON.stringify(body))
       },
@@ -339,6 +396,131 @@ const bad = (name, detail) => {
     const gate = await probe(mod.ENRICH_PATH, { model: 'x/y', tasks: [{ id: 't1', title: '自检任务' }] })
     if (gate.ok !== false || gate.reason !== 'no-model') bad('host: 没有 llm 时归纳报 no-model', JSON.stringify(gate))
     else ok('host: 没有 llm 时归纳报 no-model', gate.detail)
+  }
+
+  // ── 会话事实：**「它为什么停下来」只能从这儿读** ──────────────────────
+  //
+  // 界面上那四种颜色全吊在这个字段上。宿主把答案记在每一轮的 `turn/end` 里，
+  // 而那个字段**不在任何投影里**（投影只有 turnOutline / turnBoundary /
+  // subagentCatalog），浏览器半体拿不到。看板的宿主半体读到同一个字段，
+  // 但读完就压成一句 "agent turn ended with an error" 写进账本 ——
+  // 真实账本里那条就是这个字符串，`QUOTA` 和 `SERVER` 全被抹平了。
+  {
+    const facts = await call(`${mod.SESSION_FACTS_PATH}?ids=s-two,s-none,s-ok,s-boom`)
+    if (facts.status !== 200 || facts.body.ok !== true) bad('host: 会话事实路由回 200+ok', JSON.stringify(facts.body))
+    else ok('host: 会话事实路由回 200+ok')
+
+    // **取最后一条 turn/end**。取第一条的话，一个跑了两轮的任务永远显示第一轮的原因
+    const two = facts.body.facts?.['s-two']?.turn
+    if (two?.kind !== 'error' || two?.code !== 'QUOTA') {
+      bad('host: 取的是最后一条 turn/end（不是第一条）', JSON.stringify(two))
+    } else ok('host: 取的是最后一条 turn/end', `${two.kind}/${two.code}`)
+
+    // 错误码原样带出来，**一个字符的错误文本都不解析**
+    if (two?.message !== 'insufficient balance') bad('host: 错误原文一起带回来（给人看，不用于判断）', JSON.stringify(two))
+    else ok('host: 错误原文一起带回来')
+
+    // `aborted` 带次级原因：登出是它下面的一种，跟「你按了停止」不是一回事
+    const okFact = facts.body.facts?.['s-ok']?.turn
+    if (okFact?.kind !== 'aborted' || okFact?.abortKind !== 'hook') {
+      bad('host: aborted 带下次级原因', JSON.stringify(okFact))
+    } else ok('host: aborted 带下次级原因', okFact.abortKind)
+
+    // **没跑过不是读失败**。这两件事在下游长得一样（都没颜色），
+    // 但意思完全不同：一个是「它还没跑过一轮」，一个是「我读不出来，你别信我」
+    if (facts.body.facts?.['s-none']?.turn !== undefined || facts.body.facts?.['s-none']?.unreadable === true) {
+      bad('host: 没有 turn/end 的会话既不报结论也不报失败', JSON.stringify(facts.body.facts?.['s-none']))
+    } else ok('host: 没有 turn/end 的会话既不报结论也不报失败')
+
+    if (facts.body.facts?.['s-boom']?.unreadable !== true) {
+      bad('host: 读事件失败时带 unreadable 标记', JSON.stringify(facts.body.facts?.['s-boom']))
+    } else ok('host: 读事件失败时带 unreadable 标记')
+
+    // 只要一帧快照，**流必须被关掉** —— 不关的话每次轮询漏一个挂着的迭代器
+    const streams = gatewayCalls.filter(c => c.method === 'follow').length
+    if (streams === 0) bad('host: 走的是 follow 流（拿最新序号）', JSON.stringify(gatewayCalls))
+    else ok('host: 走的是 follow 流', `${streams} 次`)
+
+    /*
+     * 缓存：序号没变就不重读**那一页事件**。
+     *
+     * 那个 `follow`（拿最新序号的那一帧）省不掉 —— 不先问一句「它动了没」，
+     * 就不知道缓存还作不作数。它只取一帧、读的是事件流的开头，比往回翻
+     * 两百条便宜得多。所以这里卡的是 `page` 的次数，不是网关调用总数。
+     */
+    const pagesBefore = gatewayCalls.filter(c => c.method === 'page').length
+    const repeat = await call(`${mod.SESSION_FACTS_PATH}?ids=s-two`)
+    const pagesAfter = gatewayCalls.filter(c => c.method === 'page').length
+    if (pagesAfter !== pagesBefore) {
+      bad('host: 序号没变就不重读事件（缓存生效）', `又翻了一遍，多了 ${pagesAfter - pagesBefore} 次`)
+    } else ok('host: 序号没变就不重读事件', `结论照旧：${repeat.body.facts?.['s-two']?.turn?.code}`)
+
+    // 空 ids：**不碰网关**，直接空表
+    const empty = await call(`${mod.SESSION_FACTS_PATH}?ids=`)
+    if (empty.body.ok !== true || Object.keys(empty.body.facts ?? {}).length !== 0) {
+      bad('host: 空 ids 直接回空表', JSON.stringify(empty.body))
+    } else ok('host: 空 ids 直接回空表')
+  }
+
+  // 网关不在场：**答 no-gateway，不能是 404**。
+  // 404 会被界面读成「插件没装上」，那是完全指错方向的结论 ——
+  // 插件装着呢，只是这个部署没有那层网关。同 `no-model` 那次踩过的坑。
+  {
+    const mod3 = await import(`data:text/javascript;base64,${Buffer.from(`${code}\n// no-gateway`).toString('base64')}`)
+    const routes3 = new Map()
+    const noGw = {
+      webServer: { register: route => { routes3.set(route.path, route); return () => {} } },
+      logger: { warn: () => {} },
+      get: () => undefined,
+      inject: (names, callback) => callback({ webServer: { register: () => () => {} }, logger: { warn: () => {} }, get: () => undefined }),
+    }
+    const off3 = mod3.apply(noGw)
+    if (typeof off3 === 'function') off3()
+    const live3 = new Map()
+    const strict3 = { register(route) { live3.set(route.path, route); return () => {} } }
+    const ctx3 = { ...noGw, webServer: strict3, inject: (names, callback) => callback({ webServer: strict3, logger: { warn: () => {} }, get: () => undefined }) }
+    mod3.apply(ctx3)
+    let text3 = ''
+    await live3.get(mod3.SESSION_FACTS_PATH).handler(
+      { method: 'GET', url: '/api/dsh-plugin-task-board/session-facts?ids=a', [Symbol.asyncIterator]: async function* () {} },
+      { writeHead() {}, end(chunk) { text3 = chunk } },
+    )
+    const body3 = JSON.parse(text3)
+    if (body3.ok !== false || body3.reason !== 'no-gateway') bad('host: 没有网关时答 no-gateway（不是 404）', text3)
+    else ok('host: 没有网关时答 no-gateway', body3.detail)
+  }
+
+  // ── 会话归档：**只有这一处会写会话状态** ────────────────────────────────
+  // 会话不是账本里的东西，「我收工了」这句话没有别人能替我们存。
+  {
+    const empty = await call(mod.SESSION_ARCHIVE_PATH)
+    if (empty.body.ok !== true || Object.keys(empty.body.archived ?? {}).length !== 0) {
+      bad('host: 归档表初始是空的', JSON.stringify(empty.body))
+    } else ok('host: 归档表初始是空的')
+
+    const put = await call(mod.SESSION_ARCHIVE_PATH, { method: 'POST', body: { sessionId: 'sess-1', archived: true } })
+    if (put.body.ok !== true || typeof put.body.archived?.['sess-1'] !== 'number') {
+      bad('host: 归档一条会话', JSON.stringify(put.body))
+    } else ok('host: 归档一条会话')
+
+    // **落盘了**。读一次新进程才算数 —— 同一个内存对象不算
+    const reread = JSON.parse(readFileSync(join(sandbox, 'dsh-plugin-task-board', 'sessions.json'), 'utf8'))
+    if (reread.archived?.['sess-1'] === undefined) bad('host: 归档真的写进了盘', JSON.stringify(reread))
+    else ok('host: 归档真的写进了盘')
+
+    const undo = await call(mod.SESSION_ARCHIVE_PATH, { method: 'POST', body: { sessionId: 'sess-1', archived: false } })
+    if (undo.body.archived?.['sess-1'] !== undefined) bad('host: 撤销归档真的删掉了', JSON.stringify(undo.body))
+    else ok('host: 撤销归档真的删掉了')
+
+    // 脏输入挡在盘外：sessionId 必填、有长度上限
+    for (const [name, body] of [['空 sessionId', { sessionId: '' }], ['不是字符串', { sessionId: 42 }], ['超长', { sessionId: 'x'.repeat(500) }]]) {
+      const r = await call(mod.SESSION_ARCHIVE_PATH, { method: 'POST', body })
+      if (r.body.ok !== false || r.body.reason !== 'bad-request') bad(`host: 归档拒绝${name}`, JSON.stringify(r.body))
+      else ok(`host: 归档拒绝${name}`)
+    }
+    const after = JSON.parse(readFileSync(join(sandbox, 'dsh-plugin-task-board', 'sessions.json'), 'utf8'))
+    if (Object.keys(after.archived ?? {}).length !== 0) bad('host: 脏输入一个都没落盘', JSON.stringify(after))
+    else ok('host: 脏输入一个都没落盘')
   }
 
   // ── 卸载：**apply 必须把每一处副作用还回来** ──────────────────────────

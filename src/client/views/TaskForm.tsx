@@ -35,7 +35,7 @@
  * 于是再建一张，留下一张谁也不认识的孤儿卡。
  */
 import { useEffect, useMemo, useState } from 'react'
-import { STATUS, STATUS_ORDER } from '../tokens'
+import { COLUMN, COLUMN_WRITE_STATUS, STATUS_COLUMN, type ColumnId } from '../tokens'
 import type { TaskIndex } from '../model'
 import { humanCron } from '../model'
 import type { TaskRecord, TaskStatus } from '../types'
@@ -44,8 +44,23 @@ import type { BoardWrite, SchedulePatch } from '../write'
 import { writeSchedule } from '../write'
 import { CRON_PRESETS, Dropdown, type Option } from './controls'
 
-/** 新建时能选的初始列。**不含「进行中」**——那一列是执行器划的，手工放进去没有意义。 */
-const CREATE_COLUMNS: readonly TaskStatus[] = ['backlog', 'todo']
+/**
+ * 新建时能选的初始列。**不含「进行中」**——那一列是执行器划的，
+ * 手工放进去没有意义（卡会显示成在跑，但没有任何东西在跑它）。
+ *
+ * 这里列的是**列**不是账本状态：界面上「待规划」和「待办」是一列，
+ * 落下去写的是 `todo`。想建一张 `backlog` 的卡做不到 —— 合并列的代价，
+ * 已经跟用户说清楚了。
+ */
+const CREATE_COLUMNS: readonly ColumnId[] = ['todo', 'review']
+
+/**
+ * 编辑时能挪到的列。**有「进行中」，没有「归档」** ——
+ * 归档不是一个状态，是另一个动作（看板账本的 `archivedAt`），
+ * 它只有在看板上拖那一下才有意义，塞进这个下拉里会变成一个
+ * 「选了它、卡就不见了」的选项。收工请去看板上拖。
+ */
+const EDIT_COLUMNS: readonly ColumnId[] = ['todo', 'running', 'review']
 
 /** 打开排期开关时的第一份默认值。每天 9 点是排期里最常见的那一种。 */
 const DEFAULT_CRON = '0 9 * * *'
@@ -272,11 +287,24 @@ export function TaskForm({ editing, index, workspaces, write, canSchedule, defau
               <span className="fl">{isEdit ? '所在列' : '建在哪一列'}</span>
               <Dropdown
                 className="full"
-                value={status}
-                options={(isEdit ? STATUS_ORDER : CREATE_COLUMNS).map(id => ({ value: id, label: STATUS[id].label }))}
+                value={STATUS_COLUMN[status]}
+                options={(isEdit ? EDIT_COLUMNS : CREATE_COLUMNS)
+                  .map(id => ({ value: id, label: COLUMN[id].label }))}
                 ariaLabel="所在列"
-                onChange={next => setStatus(next as TaskStatus)}
+                onChange={next => {
+                  const target = COLUMN_WRITE_STATUS[next as ColumnId]
+                  if (target !== undefined) setStatus(target)
+                }}
               />
+              {/*
+                一张 `backlog` 的卡在「待办」列里显示，它的真实状态还是 `backlog`。
+                不说明的话，「我明明选的是待办、它怎么还是待规划」会被当成 bug。
+              */}
+              <span className="ro-reason">
+                {isEdit && status === 'backlog'
+                  ? '它在账本里还是「待规划」。选一次「待办」就会升成可跑。'
+                  : '「待规划」和「待办」在界面上是一列——对扫一眼的人来说给的是同一个信息。'}
+              </span>
             </div>
           </div>
 

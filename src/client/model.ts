@@ -27,6 +27,15 @@ export interface TaskIndex {
   childrenOf: Map<string, TaskRecord[]>
   /** 只要主任务，按创建时间升序。 */
   roots: TaskRecord[]
+  /**
+   * 收工了的主任务。**单独一份，不混进 `roots`。**
+   *
+   * 它们要看得到（「归档」那一列），但不能跟着 `roots` 一起去甘特和进度页——
+   * 那两页画的是「还在办的事」，把两年前的收工卡画进甘特只会把图撑烂。
+   * 卡片自己的归档（账本的 `archivedAt`）和会话的归档（我们自己的那份记录）
+   * 都落在这儿，界面上不区分。
+   */
+  archivedRoots: TaskRecord[]
 }
 
 /**
@@ -51,7 +60,12 @@ export function buildIndex(tasks: readonly TaskRecord[]): TaskIndex {
   const roots = onBoard.filter(task => task.parentId === undefined || !byId.has(task.parentId))
   roots.sort(byCreatedAsc)
 
-  return { onBoard, all, byId, childrenOf, roots }
+  const archivedRoots = all
+    .filter(task => task.archivedAt !== undefined && task.hidden !== true)
+    .filter(task => task.parentId === undefined || !byId.has(task.parentId))
+    .sort(byCreatedAsc)
+
+  return { onBoard, all, byId, childrenOf, roots, archivedRoots }
 }
 
 /** 归档的和被 provider 隐藏的都不上板。 */

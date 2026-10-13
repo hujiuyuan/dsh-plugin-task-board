@@ -104,10 +104,54 @@ export async function writeSchedule(taskId: string, patch: SchedulePatch): Promi
   return { ok: true }
 }
 
+/**
+ * 收工 / 撤销收工一张卡。
+ *
+ * 走看板自己的同源 action 通道，跟排期同一条 —— **因为扩展面上没有这个动作**。
+ * 看板那条路由的白名单里 `archive` 和 `restore` 就在 `set-schedule` 隔壁，
+ * 所以这条路是它有意开出来的，不是我们绕进去的。
+ *
+ * 会被拒的情况：任务在跑（原话 `running task cannot be archived`）、
+ * 已经归档过了（no-op）、目标不存在。
+ */
+export async function writeArchive(taskId: string, archived: boolean): Promise<WriteResult> {
+  let response: Response
+  try {
+    response = await fetch(BOARD_ACTION_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        requestId: requestId(),
+        action: { kind: archived ? 'archive' : 'restore', taskId },
+      }),
+    })
+  } catch (cause) {
+    return { ok: false, error: cause instanceof Error ? cause.message : String(cause) }
+  }
+  if (response.status === 403) {
+    return { ok: false, error: '任务看板没有接受这次请求（它只认同源的浏览器调用）' }
+  }
+  if (response.status === 404) {
+    return { ok: false, error: '任务看板的路由不在（它没装，或者启动时降级了）' }
+  }
+  const body = await response.json().catch(() => undefined) as Record<string, unknown> | undefined
+  if (!response.ok || body?.ok === false) {
+    return { ok: false, error: String(body?.error ?? `任务看板拒绝了这次改动（HTTP ${response.status}）`) }
+  }
+  return { ok: true, id: taskId }
+}
+
 export type WriteOp =
   | { op: 'create'; draft: TaskDraft }
   | { op: 'patch'; taskId: string; patch: { title?: string; description?: string; prompt?: string } }
   | { op: 'status'; taskId: string; status: string }
+  /**
+   * 收工 / 撤销收工。**不走扩展面** —— `host.tasks` 上只有
+   * `create` / `patchContent` / `setStatus` 三个动作，归档不在里面。
+   * 所以它跟排期一样走看板自己的同源 action 通道，见 `writeArchive`。
+   */
+  | { op: 'archive'; taskId: string }
+  | { op: 'restore'; taskId: string }
 
 /** 新建时看板收的字段，一个不多一个不少（`TaskBoardTaskDraft`）。 */
 export interface TaskDraft {
@@ -203,6 +247,17 @@ export function useBoardWrite(): BoardWrite {
     setBusy(true)
     setError(null)
     try {
+      /**
+       * 归档走**另一条路**（看板自己的同源 action 通道），因为扩展面的
+       * `host.tasks` 上根本没有归档这个动作。放在这里分流而不是让调用方自己选，
+       * 是为了让「写」这件事对上层只有一个入口 —— 调用方不需要知道
+       * 哪个动作走哪条线。
+       */
+      if (action.op === 'archive' || action.op === 'restore') {
+        const result = await writeArchive(action.taskId, action.op === 'archive')
+        if (!result.ok) setError(result.error)
+        return result
+      }
       const response = await fetch(WRITE_URL, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },

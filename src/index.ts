@@ -31,6 +31,7 @@ import {
   type LlmFace,
   type Material,
 } from './enrich'
+import { readFacts, type GatewayFace, type SessionFact } from './sessionfacts'
 
 declare const __PLUGIN_VERSION__: string
 const PLUGIN_VERSION = typeof __PLUGIN_VERSION__ === 'undefined' ? 'dev' : __PLUGIN_VERSION__
@@ -88,6 +89,8 @@ export const LEDGER_PATH = '/api/dsh-plugin-task-board/ledger'
 export const ENRICH_PATH = '/api/dsh-plugin-task-board/enrich'
 export const OVERRIDES_PATH = '/api/dsh-plugin-task-board/overrides'
 export const WRITE_PATH = '/api/dsh-plugin-task-board/task'
+export const SESSION_FACTS_PATH = '/api/dsh-plugin-task-board/session-facts'
+export const SESSION_ARCHIVE_PATH = '/api/dsh-plugin-task-board/session-archive'
 
 /**
  * 插件自己的目录名，在 `$DSH_HOME` 下面。
@@ -96,6 +99,15 @@ export const WRITE_PATH = '/api/dsh-plugin-task-board/task'
 const OWN_DIR = 'dsh-plugin-task-board'
 const OVERRIDES_FILE = 'enrichment.json'
 const OVERRIDES_SCHEMA = 1
+/**
+ * 会话归档。**只能存在我们自己这儿。**
+ *
+ * 任务看板的账本里没有会话这种东西——会话是宿主的，账本只管卡。所以「这个会话
+ * 我收工了」这句话没有别人能替我们存。卡走账本的 `archivedAt`（能被看板自己的
+ * archive view 看见、能恢复），会话走这个文件，**两边不是一套存储**。
+ */
+const SESSION_ARCHIVE_FILE = 'sessions.json'
+const SESSION_ARCHIVE_SCHEMA = 1
 
 /**
  * 归纳结果的缓存和人工改动，存在**插件自己的文件**里。
@@ -647,6 +659,121 @@ function registerWriteRoute(
       }
     },
   })
+
+  /**
+   * 会话事件网关。**可能永远不到**（headless 部署、或者那一层还没起来），
+   * 所以跟 `llm` 一样是可选的：路由无条件注册，拿不到就答 `no-gateway` 并说清，
+   * **不能变成 404** —— 404 会被读成「插件没装上」，那是完全指错方向的结论。
+   */
+  let gateway: GatewayFace | undefined
+  const takeGateway = (scope: HostContext): void => {
+    const found = (scope.get?.('typertGateway') ?? (scope as Record<string, unknown>).typertGateway) as GatewayFace | undefined
+    if (found !== undefined && typeof found.invoke === 'function') gateway = found
+  }
+  if (typeof ctx.inject === 'function') ctx.inject(['typertGateway'], takeGateway)
+  else takeGateway(ctx)
+
+  /** 缓存在这次运行里活着 —— 见 `sessionfacts.ts` 顶上那段。 */
+  const factCache = new Map<string, { cursor: number; fact: SessionFact }>()
+
+  route({
+    kind: 'exact',
+    path: SESSION_FACTS_PATH,
+    handler: async (req: any, res: any) => {
+      if (gateway === undefined) {
+        json(res, 200, {
+          ok: false,
+          reason: 'no-gateway',
+          detail: '这个部署里没有 typertGateway，读不了会话事件，所以判断不出每一轮是怎么结束的',
+        })
+        return
+      }
+      const ids = parseIds(new URL(req?.url ?? '/', 'http://localhost').searchParams.get('ids'))
+      if (ids.length === 0) {
+        json(res, 200, { ok: true, facts: {} })
+        return
+      }
+      try {
+        json(res, 200, { ok: true, facts: await readFacts(gateway, ids, factCache) })
+      } catch (error) {
+        json(res, 200, { ok: false, reason: 'read-failed', detail: String(error) })
+      }
+    },
+  })
+
+  const archivePath = (): string => join(dshHome(), OWN_DIR, SESSION_ARCHIVE_FILE)
+
+  /**
+   * 会话归档。GET 读、POST 改、`DELETE` 撤销。
+   *
+   * 这是**唯一**一处我们会写会话状态的地方 —— 因为「我收工了」这件事宿主管不着，
+   * 也没别人管。写的东西只有「哪些会话被收起了、什么时候」，不碰会话本身。
+   */
+  route({
+    kind: 'exact',
+    path: SESSION_ARCHIVE_PATH,
+    handler: async (req: any, res: any) => {
+      const path = archivePath()
+      if (req?.method !== 'POST') {
+        const store = await readArchive(path)
+        json(res, 200, { ok: true, archived: store.archived })
+        return
+      }
+      let body: { sessionId?: unknown; archived?: unknown }
+      try {
+        body = JSON.parse(await readBody(req)) as { sessionId?: unknown; archived?: unknown }
+      } catch (error) {
+        json(res, 200, { ok: false, reason: 'bad-request', detail: String(error) })
+        return
+      }
+      const sessionId = body.sessionId
+      if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 200) {
+        json(res, 200, { ok: false, reason: 'bad-request', detail: 'sessionId 是必填的' })
+        return
+      }
+      try {
+        const store = await readArchive(path)
+        if (body.archived === false) delete store.archived[sessionId]
+        else store.archived[sessionId] = Date.now()
+        await writeArchive(path, store)
+        json(res, 200, { ok: true, archived: store.archived })
+      } catch (error) {
+        json(res, 200, { ok: false, reason: 'write-failed', detail: String(error) })
+      }
+    },
+  })
+}
+
+/** 会话 id 表。前端按逗号传；认不出的整条丢掉，不做「猜一个」。 */
+export function parseIds(raw: string | null): string[] {
+  if (raw === null || raw.length === 0) return []
+  return [...new Set(raw.split(',').map(part => part.trim()).filter(part => part.length > 0 && part.length <= 200))].slice(0, 500)
+}
+
+interface ArchiveStore {
+  schemaVersion: number
+  archived: Record<string, number>
+}
+
+async function readArchive(path: string): Promise<ArchiveStore> {
+  try {
+    const parsed = JSON.parse(await readFile(path, 'utf8')) as Partial<ArchiveStore>
+    if (parsed.schemaVersion !== SESSION_ARCHIVE_SCHEMA) return { schemaVersion: SESSION_ARCHIVE_SCHEMA, archived: {} }
+    const archived: Record<string, number> = {}
+    for (const [id, at] of Object.entries(parsed.archived ?? {})) {
+      if (typeof at === 'number' && Number.isFinite(at)) archived[id] = at
+    }
+    return { schemaVersion: SESSION_ARCHIVE_SCHEMA, archived }
+  } catch {
+    // 文件不在、坏了、格式不对：都当「一个都没归档」。丢的是「我收起过」这个标记，
+    // 会话本身一根毛都没动 —— 所以不值得因此报错。
+    return { schemaVersion: SESSION_ARCHIVE_SCHEMA, archived: {} }
+  }
+}
+
+async function writeArchive(path: string, store: ArchiveStore): Promise<void> {
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, `${JSON.stringify(store, null, 2)}\n`, 'utf8')
 }
 
 /**

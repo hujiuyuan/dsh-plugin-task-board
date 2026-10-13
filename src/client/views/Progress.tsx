@@ -12,7 +12,7 @@
  */
 import { useMemo, useRef, useState } from 'react'
 import { expectedRuns, runsIn } from '../derive'
-import { STATUS, STATUS_ORDER } from '../tokens'
+import { COLUMN, COLUMN_ORDER, columnOf } from '../tokens'
 import type { TaskIndex } from '../model'
 import { dayKey, isSessionTask, modeOf, spanEnd } from '../model'
 import type { TaskRecord } from '../types'
@@ -112,7 +112,7 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
 
   const stats = useMemo(() => {
     const count: Record<string, number> = {}
-    for (const status of STATUS_ORDER) count[status] = 0
+    for (const column of COLUMN_ORDER) count[column] = 0
     let total = 0
     let scheduled = 0
     let scheduledOn = 0
@@ -120,7 +120,11 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
     let subtasks = 0
     let sessions = 0
 
-    for (const task of index.onBoard) {
+    /*
+     * 归档的也在统计里 —— 它是一列，不是「不存在」。早先这一页看不到归档的东西，
+     * 于是「收工率」永远算不出来（分子恒为 0）。
+     */
+    for (const task of [...index.onBoard, ...index.archivedRoots]) {
       if (task.parentId !== undefined) { subtasks += 1; continue }
       // 「大任务」数的是**账本里的卡**，会话行不算 —— 它没有卡。
       // 但会话行照常进总数和状态分布，否则它们又变成看不见的了
@@ -135,10 +139,10 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
       }
       if (!inScope(task)) continue
       total += 1
-      count[task.status] += 1
+      count[columnOf(task)] += 1
     }
     return { count, total, scheduled, scheduledOn, bigTasks, subtasks, sessions }
-  }, [index.onBoard, inScope])
+  }, [index.onBoard, index.archivedRoots, inScope])
 
   /**
    * 按工作区分桶。
@@ -188,7 +192,15 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
     )
   }
 
-  const rate = stats.total === 0 ? 0 : Math.round((stats.count.done / stats.total) * 100)
+  /*
+   * **收工率**，不是「完成率」。
+   *
+   * 分子的口径变过一次。原来数的是账本里 `done` 的卡，可那个状态的意思是
+   * 「跑完了、等你过目」——它跟「这件事结束了」根本不是一回事。真正由人
+   * 说了算的结束只有一个：**归档**。所以分子换成归档数。
+   * 剩下的那些还在「待审阅」里排队，等你自己判。
+   */
+  const rate = stats.total === 0 ? 0 : Math.round((stats.count.archived / stats.total) * 100)
 
   return (
     <div className="progress">
@@ -228,9 +240,10 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
           所以挂在一个悬停气泡上：想核的时候一悬停就有，其余时候不占地方。
         */}
         <span className="meter" title={[
-          `已完成任务数 ÷ 任务总数`,
+          `已收工的任务数 ÷ 任务总数`,
+          '**收工 = 归档**，只能由人手动做。跑完的卡停在「待审阅」，不算收工。',
           `统计范围 ${dayKey(effective.from)} ~ ${dayKey(effective.to)}`,
-          '日期区间只筛已经结束的任务；还开着的（待规划 / 待办 / 进行中）永远计入',
+          '日期区间只筛已经结束的任务；还开着的（待办 / 进行中）永远计入',
           '定时 / 大任务 / 子任务分别统计，三者互不相同、也不相加',
           '',
           '数的是任务卡和「没有卡的会话」，不是会话次数：一张卡可以跑很多次，每次一个会话。',
@@ -246,23 +259,23 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
         <div className="p-top">
           <div className="panel p-donut">
             <Donut
-              slices={STATUS_ORDER.map(status => ({ value: stats.count[status], css: STATUS[status].css, label: STATUS[status].label }))}
+              slices={COLUMN_ORDER.map(column => ({ value: stats.count[column], css: COLUMN[column].css, label: COLUMN[column].label }))}
               center={`${rate}%`}
-              sub={`${stats.count.done} / ${stats.total} 已完成`}
-              ariaLabel={`按状态分布的任务占比，完成率 ${rate}%`}
+              sub={`${stats.count.archived} / ${stats.total} 已收工`}
+              ariaLabel={`按列分布的任务占比，收工率 ${rate}%`}
             />
           </div>
 
           <div className="panel p-list">
-            <h3>按状态</h3>
-            {STATUS_ORDER.map(status => {
-              const n = stats.count[status]
+            <h3>按列</h3>
+            {COLUMN_ORDER.map(column => {
+              const n = stats.count[column]
               const pct = stats.total === 0 ? 0 : (n / stats.total) * 100
               return (
-                <div className="p-row" key={status}>
-                  <span className="pd" style={{ background: STATUS[status].css }} aria-hidden="true" />
-                  <span className="pn">{STATUS[status].label}</span>
-                  <span className="ptrack"><span className="pfill" style={{ width: `${pct}%`, background: STATUS[status].css }} /></span>
+                <div className="p-row" key={column}>
+                  <span className="pd" style={{ background: COLUMN[column].css }} aria-hidden="true" />
+                  <span className="pn">{COLUMN[column].label}</span>
+                  <span className="ptrack"><span className="pfill" style={{ width: `${pct}%`, background: COLUMN[column].css }} /></span>
                   <span className="pc">{n}</span>
                   <span className="pp">{Math.round(pct)}%</span>
                 </div>
@@ -283,7 +296,7 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
                 <span className="k">子任务</span>
                 <b>{stats.subtasks}</b>
               </span>
-              <span className="bk" title="没有任务卡的会话：它们也在上面的「任务总数」里，按在跑 / 停着分到「进行中」和「已完成」">
+              <span className="bk" title="没有任务卡的会话：它们也在上面的「任务总数」里。在跑的进「进行中」，其余全在「待审阅」等你收工">
                 <span className="k">会话</span>
                 <b>{stats.sessions}</b>
               </span>
@@ -478,15 +491,16 @@ function WorkspaceCard({ id, bucket, workspaces, now }: WorkspaceCardProps) {
   // 不按区间筛，所以读 main
   const tasks = scoped
   const count: Record<string, number> = {}
-  for (const status of STATUS_ORDER) count[status] = 0
-  for (const task of tasks) count[task.status] += 1
+  for (const column of COLUMN_ORDER) count[column] = 0
+  for (const task of tasks) count[columnOf(task)] += 1
   const total = tasks.length
-  const done = count.done
-  const rate = total === 0 ? 0 : Math.round((done / total) * 100)
+  // 分子是**归档**不是 `done`，跟总览同一套口径 —— 两处不一致的话，
+  // 各卡加起来就跟上面的总数对不上，整页数字就都不能信了
+  const rate = total === 0 ? 0 : Math.round((count.archived / total) * 100)
 
   // 百分比用最大余数法补齐到正好 100 —— 各自四舍五入的话加起来常常是 99 或 101，
   // 图例上写出来就是错的
-  const percents = largestRemainder(STATUS_ORDER.map(status => count[status]), total)
+  const percents = largestRemainder(COLUMN_ORDER.map(column => count[column]), total)
 
   // 工作区卡底部那行：原型写「本周目标 2/3」。真实数据里没有目标，
   // 但**有排期** —— 有排期就写「应跑 / 实跑」，没排期就只写实跑。
@@ -523,14 +537,14 @@ function WorkspaceCard({ id, bucket, workspaces, now }: WorkspaceCardProps) {
           <Donut
             size={88}
             thickness={10}
-            slices={STATUS_ORDER.map(status => ({ value: count[status], css: STATUS[status].css, label: STATUS[status].label }))}
+            slices={COLUMN_ORDER.map(column => ({ value: count[column], css: COLUMN[column].css, label: COLUMN[column].label }))}
             center={`${rate}%`}
-            ariaLabel={`完成率 ${rate}%`}
+            ariaLabel={`收工率 ${rate}%`}
           />
         </div>
         <div className="p-ws-num">
           <b>{total} 个任务</b>
-          <span>完成 {done} 个</span>
+          <span>收工 {count.archived} 个</span>
         </div>
       </div>
 
@@ -538,20 +552,20 @@ function WorkspaceCard({ id, bucket, workspaces, now }: WorkspaceCardProps) {
         <span
           className="stk"
           role="img"
-          aria-label={`按状态的任务占比：${STATUS_ORDER.map((s, i) => `${STATUS[s].label} ${percents[i]}%`).join('，')}`}
+          aria-label={`按列的任务占比：${COLUMN_ORDER.map((c, i) => `${COLUMN[c].label} ${percents[i]}%`).join('，')}`}
         >
-          {STATUS_ORDER.map((status, i) =>
-            count[status] === 0 ? null : (
-              <span key={status} className="sg" style={{ width: `${percents[i]}%`, background: STATUS[status].css }} />
+          {COLUMN_ORDER.map((column, i) =>
+            count[column] === 0 ? null : (
+              <span key={column} className="sg" style={{ width: `${percents[i]}%`, background: COLUMN[column].css }} />
             ),
           )}
         </span>
         <div className="stk-lg" style={{ marginTop: 7 }}>
-          {STATUS_ORDER.map((status, i) =>
-            count[status] === 0 ? null : (
-              <span className="lg" key={status}>
-                <i style={{ background: STATUS[status].css }} aria-hidden="true" />
-                {STATUS[status].label} <b>{percents[i]}%</b>
+          {COLUMN_ORDER.map((column, i) =>
+            count[column] === 0 ? null : (
+              <span className="lg" key={column}>
+                <i style={{ background: COLUMN[column].css }} aria-hidden="true" />
+                {COLUMN[column].label} <b>{percents[i]}%</b>
               </span>
             ),
           )}

@@ -11,10 +11,12 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import { deriveIntent, manualSettled, periodOf, priorityOf, ruleRank } from '../derive'
-import { STATUS, STATUS_ORDER, barColor, hueOf } from '../tokens'
+import { COLUMN, COLUMN_ORDER, COLUMN_WRITE_STATUS, STATUS_COLUMN, barColor, hueOf, type ColumnId } from '../tokens'
 import type { TaskIndex } from '../model'
-import { dayKey, groupByDay, isSessionTask, lastExecution, paginateByWorkday, planOf, rollupOf, runBudgetOf, shortTime, spanEnd, stopReasonOf, triggerOf } from '../model'
+import { dayKey, groupByDay, isRunning, isSessionTask, lastExecution, paginateByWorkday, planOf, rollupOf, runBudgetOf, shortTime, spanEnd, stopReasonOf, triggerOf } from '../model'
+import { TONE_LABEL, toneColor, toneInputOf, toneOf, toneReason, toneShowsIn, type Tone } from '../tone'
 import type { TaskRecord, TaskStatus } from '../types'
+import type { Signals } from '../signals'
 import type { WorkspaceIndex } from '../workspaces'
 import { Dropdown, EmptyState, IconClock, IconMag, IconMini, MiniSearch, emptyTaskCopy, type Option } from './controls'
 
@@ -49,10 +51,17 @@ interface BoardProps {
    */
   canMove?: boolean
   /** 拖到某一列。真去写、以及把结果告诉用户，都是父级的事。 */
-  onMove?: (task: TaskRecord, status: TaskStatus) => void
+  onMove?: (task: TaskRecord, column: ColumnId) => void
+  /**
+   * 会话事实。**判断用**——不参与布局，所以缺省是一张空表也照常画。
+   * 拿不到的时候界面退化成「没有颜色」，其余的（列、排序、筛选）一个都不少。
+   */
+  signals: Signals
+  /** 归档 / 取消归档。**只有这一种操作能落到会话上。** */
+  onArchive?: (task: TaskRecord, archived: boolean) => void
 }
 
-export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll, sourceKind, onOpenBoard, canMove = false, onMove }: BoardProps) {
+export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll, sourceKind, onOpenBoard, canMove = false, onMove, signals, onArchive }: BoardProps) {
   /**
    * 正在拖的那张卡 / 悬停在哪一列。
    *
@@ -60,21 +69,21 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
    * 移交的动作由 `onMove` 交出去，父级再把结果变成一句 toast。
    */
   const [dragging, setDragging] = useState<TaskRecord | undefined>(undefined)
-  const [over, setOver] = useState<TaskStatus | undefined>(undefined)
-  const [filters, setFilters] = useState<Record<TaskStatus, ColFilter>>(() => ({
-    backlog: EMPTY_FILTER, todo: EMPTY_FILTER, running: EMPTY_FILTER, done: EMPTY_FILTER, failed: EMPTY_FILTER,
+  const [over, setOver] = useState<ColumnId | undefined>(undefined)
+  const [filters, setFilters] = useState<Record<ColumnId, ColFilter>>(() => ({
+    running: EMPTY_FILTER, review: EMPTY_FILTER, todo: EMPTY_FILTER, archived: EMPTY_FILTER,
   }))
-  const [searchOpen, setSearchOpen] = useState<Record<TaskStatus, boolean>>(() => ({
-    backlog: false, todo: false, running: false, done: false, failed: false,
+  const [searchOpen, setSearchOpen] = useState<Record<ColumnId, boolean>>(() => ({
+    running: false, review: false, todo: false, archived: false,
   }))
-  const [pages, setPages] = useState<Record<TaskStatus, number>>(() => ({
-    backlog: 1, todo: 1, running: 1, done: 1, failed: 1,
+  const [pages, setPages] = useState<Record<ColumnId, number>>(() => ({
+    running: 1, review: 1, todo: 1, archived: 1,
   }))
   /** 用户手动开/关过哪些日期组。没记过的走默认（最新那组开）。 */
   const [override, setOverride] = useState<ReadonlyMap<string, boolean>>(() => new Map())
 
-  const setFilter = (status: TaskStatus, patch: Partial<ColFilter>): void =>
-    setFilters(current => ({ ...current, [status]: { ...current[status], ...patch } }))
+  const setFilter = (column: ColumnId, patch: Partial<ColFilter>): void =>
+    setFilters(current => ({ ...current, [column]: { ...current[column], ...patch } }))
 
   const wsOptions: Option[] = useMemo(
     () => [
@@ -88,29 +97,49 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
   )
 
   const columns = useMemo(() => {
-    const out: Record<TaskStatus, TaskRecord[]> = { backlog: [], todo: [], running: [], done: [], failed: [] }
-    for (const task of index.roots) out[task.status].push(task)
-    for (const status of STATUS_ORDER) {
+    const out: Record<ColumnId, TaskRecord[]> = { running: [], review: [], todo: [], archived: [] }
+    for (const task of index.roots) out[STATUS_COLUMN[task.status]].push(task)
+    /*
+     * 归档单独一份（`archivedRoots`），**不是从 `roots` 里筛出来的** ——
+     * 归档的卡压根不在 `roots` 里（`isOnBoard` 把它们排掉了）。
+     * 卡片的归档来自看板账本，会话的归档来自我们自己那份记录，
+     * 到了这儿不分彼此，都是「你收工了」。
+     */
+    out.archived.push(...index.archivedRoots)
+    for (const column of COLUMN_ORDER) {
+      if (column === 'archived') {
+        // 最近收工的在前
+        out.archived.sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0))
+        continue
+      }
       // 结束了的按「结算时间」倒序 —— 跟卡片第四行写出来、跟分组用的都是同一个时刻，
       // 三者不一致的话列表顺序看起来就是随机的。
-      // 没结束的三列：**先按优先级，再按创建时间倒序**（原型是「有目标的在前」，
+      // 没结束的两列：**先按优先级，再按创建时间倒序**（原型是「有目标的在前」，
       // 这里换成一条真能从账本算出来的：快炸的、正在跑的、会自己动的排前面）。
-      out[status].sort(status === 'done' || status === 'failed'
+      out[column].sort(column === 'review'
         ? (a, b) => spanEnd(b, now) - spanEnd(a, now)
         : (a, b) => ruleRank(b) - ruleRank(a) || b.createdAt - a.createdAt)
-      // 会话行**沉到本列最后**。它们是「顺带看看」的东西，一堆会话压在真正的卡上面，
-      // 这一列就不再回答「哪个窗口在等我」了 —— 那正是这个插件存在的理由。
-      out[status].sort((a, b) => Number(isSessionTask(a)) - Number(isSessionTask(b)))
+      /*
+       * 会话行沉到本列最后 —— **但「待审阅」列不沉**。
+       *
+       * 这条规矩原来是全列统一的，理由是「一堆会话压在真正的卡上面，这一列就不
+       * 再回答『哪个窗口在等我』了」。现在这句话反过来了：待审阅列问的正是
+       * 「哪些窗口还没收工」，会话是这个问题的**正主**，把它们沉到底才是答非所问。
+       * 另外两列（在跑 / 待办）里它们是顺带看看的东西，照旧沉底。
+       */
+      if (column !== 'review') {
+        out[column].sort((a, b) => Number(isSessionTask(a)) - Number(isSessionTask(b)))
+      }
     }
     return out
-  }, [index.roots, now])
+  }, [index.roots, index.archivedRoots, now])
 
   const filtered = useMemo(() => {
-    const out = {} as Record<TaskStatus, TaskRecord[]>
-    for (const status of STATUS_ORDER) {
-      const filter = filters[status]
+    const out = {} as Record<ColumnId, TaskRecord[]>
+    for (const column of COLUMN_ORDER) {
+      const filter = filters[column]
       const needle = filter.q.trim().toLowerCase()
-      out[status] = columns[status].filter(task => {
+      out[column] = columns[column].filter(task => {
         if (filter.ws === '__none__' && task.workspaceId !== undefined) return false
         if (filter.ws !== '' && filter.ws !== '__none__' && task.workspaceId !== filter.ws) return false
         if (filter.trig !== 'all') {
@@ -131,20 +160,89 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
    * 会话行一律 `canMove: false`：它没有账本可写，拖了也无处可落。
    * 给 false 时连 `draggable` 都不挂，卡片根本不会出现「可以拖」的手感。
    */
-  const cardProps = (task: TaskRecord) => ({
-    task, index, now, workspaces, selectedId, onSelect,
-    canMove: canMove && !isSessionTask(task),
-    dragging: dragging?.id === task.id,
-    onDragBegin: setDragging,
-    onDragEnd: () => setDragging(undefined),
-  })
+  /** 一个任务的信号输入。会话按会话 id 查，卡按它最后一次执行的会话 id 查。 */
+  const signalsOf = (task: TaskRecord): {
+    turn?: import('../tone').TurnFact
+    pendingKind?: string
+    stuckChildren?: number
+    unread?: boolean
+  } => {
+    const sessionId = task.fromSession ?? lastExecution(task)?.sessionId
+    if (sessionId === undefined) return {}
+    return {
+      ...(signals.facts.get(sessionId) === undefined ? {} : { turn: signals.facts.get(sessionId) }),
+      ...(signals.pending.get(sessionId) === undefined ? {} : { pendingKind: signals.pending.get(sessionId) }),
+      ...(signals.stuck.get(sessionId) === undefined ? {} : { stuckChildren: signals.stuck.get(sessionId) }),
+      unread: signals.unread.has(sessionId),
+    }
+  }
 
-  const anyFilter = STATUS_ORDER.some(status => {
-    const filter = filters[status]
+  const cardProps = (task: TaskRecord) => {
+    const input = toneInputOf(task, signalsOf(task))
+    const tone = task.archivedAt === undefined ? toneOf(input) : undefined
+    return {
+      task, index, now, workspaces, selectedId, onSelect,
+      /*
+       * 会话行**也能拖**，但只有「归档」那一列收它 —— 见下面 `droppable` 的算法。
+       * 早先这里是 `canMove && !isSessionTask(task)`，会话一律拖不动；
+       * 现在「收工」那句话只有人说了算，而拖是说出那句话的最直接的方式。
+       */
+      canMove,
+      dragging: dragging?.id === task.id,
+      onDragBegin: setDragging,
+      onDragEnd: () => setDragging(undefined),
+      tone,
+      toneWhy: tone === undefined ? undefined : toneReason(input),
+      /*
+       * 「能不能收工」要单独给下来，不能在卡片里自己猜 ——
+       * 猜的话，一张在跑的会话卡上会写着「拖到归档就是收工」，
+       * 而它拖过去根本不会被接收（在跑的不许收工）。
+       * 真正说了算的是 `dropTarget`，这里只是把它的结论转述给卡片。
+       */
+      canArchive: canMove && dropTarget(task, 'archived') === 'archive',
+      canRestore: canMove && dropTarget(task, 'review') === 'restore',
+    }
+  }
+
+  /**
+   * 这个任务能不能放进这一列。
+   *
+   * 会话行**只认「归档」**：其余三列对它是算出来的（在跑 / 没在跑），
+   * 拖过去没有东西可写——一个「接受了但什么也没发生」的放置区，
+   * 比不让放更让人困惑。卡片则相反：四列里除了归档都对应一个账本状态，
+   * 归档对应账本的 `archivedAt`。
+   */
+  const dropTarget = (task: TaskRecord, column: ColumnId): 'move' | 'archive' | 'restore' | undefined => {
+    const archived = task.archivedAt !== undefined
+
+    // 收工过的：只能往「归档」外面拖（= 撤销归档）
+    if (archived) return column === 'archived' ? undefined : 'restore'
+    if (column === 'archived') {
+      /*
+       * **在跑的不许收工。** 看板那边对卡也是这个规矩（原话
+       * `running task cannot be archived`），会话这边由我们自己把住。
+       * 收一件还在动的事，等于把它的后半段藏起来 —— 它跑完时你已经
+       * 看不到它了，而它恰恰是那时候最需要你看的。
+       *
+       * 会话行**没有执行记录**，`isRunning` 在它身上恒为 false，
+       * 所以要看它自己的 `status` —— 那个值是我们按宿主的 `running` 推出来的。
+       */
+      const live = isSessionTask(task) ? task.status === 'running' : isRunning(task)
+      return live ? undefined : 'archive'
+    }
+
+    // 会话行只认归档。其余三列对它是算出来的（在跑 / 没在跑），拖过去没有东西可写
+    if (isSessionTask(task)) return undefined
+    // 拖回自己原来那一列不算有地方可放：接收了也只是原地不动
+    return STATUS_COLUMN[task.status] === column ? undefined : 'move'
+  }
+
+  const anyFilter = COLUMN_ORDER.some(column => {
+    const filter = filters[column]
     return filter.ws !== '' || filter.q.trim().length > 0 || filter.trig !== 'all'
   })
 
-  const totalVisible = STATUS_ORDER.reduce((sum, status) => sum + filtered[status].length, 0)
+  const totalVisible = COLUMN_ORDER.reduce((sum, column) => sum + filtered[column].length, 0)
   if (totalVisible === 0) {
     if (anyFilter) {
       return (
@@ -154,7 +252,7 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
             body="筛选条件把账本滤空了，清一下试试。"
             actionLabel="清空全部筛选"
             onAction={() => {
-              setFilters({ backlog: EMPTY_FILTER, todo: EMPTY_FILTER, running: EMPTY_FILTER, done: EMPTY_FILTER, failed: EMPTY_FILTER })
+              setFilters({ running: EMPTY_FILTER, review: EMPTY_FILTER, todo: EMPTY_FILTER, archived: EMPTY_FILTER })
               onClearAll()
             }}
           />
@@ -175,36 +273,36 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
 
   return (
     <div className="board">
-      {STATUS_ORDER.map(status => {
-        const meta = STATUS[status]
-        const all = columns[status]
-        const items = filtered[status]
-        const filter = filters[status]
+      {COLUMN_ORDER.map(column => {
+        const meta = COLUMN[column]
+        const all = columns[column]
+        const items = filtered[column]
+        const filter = filters[column]
         const filteredNow = filter.ws !== '' || filter.q.trim().length > 0 || filter.trig !== 'all'
         // **筛过之后照样按天分组**。筛完就退回一长条平铺列表的话，
         // 用户每打一个字列表结构就变一次，找东西反而更难。
-        const dated = status === 'done' || status === 'failed'
+        // 「待审阅」和「归档」都是只增不减的两列，都得按天折；
+        // 「进行中」和「待办」是有多少看多少，折起来只是多一次点击。
+        const dated = column === 'review' || column === 'archived'
         const days = dated ? groupByDay(items, now) : undefined
-        const shown = days === undefined ? undefined : paginateByWorkday(days, pages[status] * WORKDAYS_PER_PAGE)
+        const shown = days === undefined ? undefined : paginateByWorkday(days, pages[column] * WORKDAYS_PER_PAGE)
         const rest = days === undefined ? [] : days.slice(shown!.length)
         const restCount = rest.reduce((sum, group) => sum + group.items.length, 0)
         const restWorkdays = rest.filter(group => !group.weekend).length
 
-        // 拖着自己原来那一列不算「有地方可放」：接收了也只是原地不动，
-        // 高亮起来反而是在承诺一件不会发生的事
-        const droppable = canMove && dragging !== undefined && dragging.status !== status
+        const droppable = canMove && dragging !== undefined && dropTarget(dragging, column) !== undefined
 
         return (
           <section
-            className={`col${over === status && droppable ? ' drop-on' : ''}`}
-            key={status}
+            className={`col${over === column && droppable ? ' drop-on' : ''}`}
+            key={column}
             aria-label={meta.label}
             onDragOver={canMove
               ? event => {
                   // 不 preventDefault 的话浏览器不认这是放置区，drop 根本不会触发
                   event.preventDefault()
                   event.dataTransfer.dropEffect = 'move'
-                  setOver(status)
+                  setOver(column)
                 }
               : undefined}
             onDragLeave={canMove
@@ -212,7 +310,7 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
                   // 移到自己的子元素上也会触发 dragleave。不排掉的话，
                   // 鼠标从列的空白处挪到卡片上，整列的高亮就闪一下没了
                   if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
-                  setOver(current => (current === status ? undefined : current))
+                  setOver(current => (current === column ? undefined : current))
                 }
               : undefined}
             onDrop={canMove
@@ -221,8 +319,13 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
                   const task = dragging
                   setOver(undefined)
                   setDragging(undefined)
-                  if (task === undefined || onMove === undefined || task.status === status) return
-                  onMove(task, status)
+                  if (task === undefined || !droppable) return
+                  switch (dropTarget(task, column)) {
+                    case 'archive': onArchive?.(task, true); return
+                    case 'restore': onArchive?.(task, false); return
+                    case 'move': onMove?.(task, column); return
+                    default: return
+                  }
                 }
               : undefined}
           >
@@ -239,15 +342,15 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
             </div>
 
             <div className="col-filters">
-              {searchOpen[status] ? (
+              {searchOpen[column] ? (
                 <MiniSearch
                   value={filter.q}
                   placeholder={`在「${meta.label}」列里搜名称 / 标签…`}
                   ariaLabel={`在「${meta.label}」列里搜索`}
-                  onChange={next => setFilter(status, { q: next })}
+                  onChange={next => setFilter(column, { q: next })}
                   onClose={() => {
-                    setSearchOpen(current => ({ ...current, [status]: false }))
-                    setFilter(status, { q: '' })
+                    setSearchOpen(current => ({ ...current, [column]: false }))
+                    setFilter(column, { q: '' })
                   }}
                 />
               ) : (
@@ -257,13 +360,13 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
                     value={filter.ws}
                     options={wsOptions}
                     ariaLabel={`「${meta.label}」列的项目筛选`}
-                    onChange={next => setFilter(status, { ws: next })}
+                    onChange={next => setFilter(column, { ws: next })}
                   />
                   <IconMini
                     on={filter.q.length > 0}
                     label={`在「${meta.label}」列里搜索`}
                     title={filter.q.length > 0 ? `正在筛选：${filter.q}` : `在「${meta.label}」列里搜索`}
-                    onClick={() => setSearchOpen(current => ({ ...current, [status]: true }))}
+                    onClick={() => setSearchOpen(current => ({ ...current, [column]: true }))}
                   >
                     <IconMag />
                   </IconMini>
@@ -272,7 +375,7 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
                       className={filter.trig === 'all' ? undefined : 'on'}
                       aria-label={`「${meta.label}」列的触发方式筛选`}
                       value={filter.trig}
-                      onChange={event => setFilter(status, { trig: event.target.value as ColFilter['trig'] })}
+                      onChange={event => setFilter(column, { trig: event.target.value as ColFilter['trig'] })}
                     >
                       <option value="all">触发</option>
                       <option value="schedule">仅定时</option>
@@ -293,23 +396,23 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
                       <button
                         type="button"
                         className="btn btn-secondary"
-                        onClick={() => setFilter(status, EMPTY_FILTER)}
+                        onClick={() => setFilter(column, EMPTY_FILTER)}
                       >
                         清空本列筛选
                       </button>
                     </>
                   ) : (
-                    '这一列还没有任务'
+                    COLUMN_EMPTY[column]
                   )}
                 </p>
               ) : shown === undefined ? (
                 items.map(task => (
-                  <Card key={task.id} {...cardProps(task)} />
+                  <Card key={task.id} column={column} {...cardProps(task)} />
                 ))
               ) : (
                 <>
                   {shown.map((group, groupIndex) => {
-                    const key = `${status}:${group.key}`
+                    const key = `${column}:${group.key}`
                     const open = override.get(key) ?? groupIndex === 0
                     return (
                       <div key={group.key}>
@@ -332,7 +435,7 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
                         </div>
                         {open
                           ? group.items.map(task => (
-                              <Card key={task.id} {...cardProps(task)} />
+                              <Card key={task.id} column={column} {...cardProps(task)} />
                             ))
                           : null}
                       </div>
@@ -347,7 +450,7 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
                       <button
                         type="button"
                         className="btn btn-secondary"
-                        onClick={() => setPages(current => ({ ...current, [status]: current[status] + 1 }))}
+                        onClick={() => setPages(current => ({ ...current, [column]: current[column] + 1 }))}
                       >
                         更多
                       </button>
@@ -376,8 +479,18 @@ function dayLabelOf(key: string, now: number): string {
   return `${sameYear ? `${mm}-${dd}` : `${date.getFullYear()}-${mm}-${dd}`} · 周${weekday}`
 }
 
+/** 各列空着时那句话。分开写是有用的：「归档」空着是好事，「进行中」空着不是。 */
+const COLUMN_EMPTY: Record<ColumnId, string> = {
+  running: '现在没有在跑的',
+  review: '没有等你过目的 —— 都收工了',
+  todo: '没有排着队的事',
+  archived: '还没收工过任何一件',
+}
+
 interface CardProps {
   task: TaskRecord
+  /** 它现在显示在哪一列。**颜色只有「待审阅」列显示**（`cascade` 除外）。 */
+  column: ColumnId
   index: TaskIndex
   now: number
   workspaces: WorkspaceIndex
@@ -388,13 +501,20 @@ interface CardProps {
   dragging: boolean
   onDragBegin: (task: TaskRecord) => void
   onDragEnd: () => void
+  tone?: Tone
+  /** 颜色旁边那句话，进 title 气泡。 */
+  toneWhy?: string
+  /** 拖到「归档」这一列会被接收。由 `dropTarget` 算，卡片自己不改判。 */
+  canArchive: boolean
+  /** 拖出「归档」会被接收（= 撤销归档）。 */
+  canRestore: boolean
 }
 
 /**
  * 一张卡。**四行永远都渲染**（没内容就是空 div）——少一行的话 grid 会把后面的
  * 提上来，「第几行是什么」这条对齐就断了。
  */
-function Card({ task, index, now, workspaces, selectedId, onSelect, canMove, dragging, onDragBegin, onDragEnd }: CardProps) {
+function Card({ task, column, index, now, workspaces, selectedId, onSelect, canMove, dragging, onDragBegin, onDragEnd, tone, toneWhy, canArchive, canRestore }: CardProps) {
   const rollup = useMemo(() => rollupOf(index, task), [index, task])
   const last = lastExecution(task)
   const running = last !== undefined && last.endedAt === undefined
@@ -432,21 +552,27 @@ function Card({ task, index, now, workspaces, selectedId, onSelect, canMove, dra
   const tip = [
     task.title,
     session
-      ? `会话 ${task.fromSession} · ${wsName} · ${STATUS[task.status].label}`
-      : `${task.id} · ${wsName} · ${STATUS[task.status].label}`,
+      ? `会话 ${task.fromSession} · ${wsName} · ${COLUMN[column].label}`
+      : `${task.id} · ${wsName} · ${COLUMN[column].label}`,
+    // **颜色那句话排在最前面。** 它是这张卡上唯一一条「为什么现在要看它」的信息，
+    // 排在描述后面就等于没说
+    tone === undefined ? undefined : `【${TONE_LABEL[tone]}】${toneWhy ?? ''}`,
     task.description.length > 0 ? task.description : undefined,
-    session
-      ? '这一行是没有任务卡的会话，按它在不在跑归列。点开可以直接接着聊'
-      : undefined,
+    session ? `这一行是没有任务卡的会话。点开可以直接接着聊${canArchive ? '；拖到「归档」就是收工' : ''}` : undefined,
     // 说在动手之前。跑到一半的卡移不动是看板的规矩，等拖完再弹一句「不行」
     // 是把一句话该在前面的信息放到了后面
-    canMove && running ? '跑着的时候移不动：锁属于那次执行，不属于这一列的名字' : undefined,
-    canMove ? '拖到别的列可以换状态' : undefined,
+    canMove && !session && running ? '跑着的时候移不动：锁属于那次执行，不属于这一列的名字' : undefined,
+    // 说「能拖到归档」之前先确认它真能被接收 —— 见 `canArchive` 的注释
+    canArchive ? '拖到「归档」就是收工' : undefined,
+    canArchive && !session ? '拖到别的列可以换状态' : undefined,
+    canRestore ? '拖回左边任意一列就是撤销归档' : undefined,
   ].filter(Boolean).join('\n')
+
+  const showsTone = tone !== undefined && toneShowsIn(tone, column)
 
   return (
     <article
-      className={`card${running || task.status === 'running' ? ' is-running' : ''}${session ? ' is-session' : ''}${task.id === selectedId ? ' on' : ''}${dragging ? ' is-dragging' : ''}${canMove ? ' can-move' : ''}`}
+      className={`card${running || task.status === 'running' ? ' is-running' : ''}${session ? ' is-session' : ''}${task.id === selectedId ? ' on' : ''}${dragging ? ' is-dragging' : ''}${canMove ? ' can-move' : ''}${showsTone ? ` tone tone-${tone}` : ''}`}
       role="button"
       tabIndex={0}
       draggable={canMove}
@@ -460,7 +586,11 @@ function Card({ task, index, now, workspaces, selectedId, onSelect, canMove, dra
           }
         : undefined}
       onDragEnd={canMove ? () => onDragEnd() : undefined}
-      style={{ ['--bar' as string]: barColor(last) }}
+      style={{
+        ['--bar' as string]: barColor(last),
+        // 边框色走变量，呼吸动画才能只改这一个值 —— 见 styles.ts 里那条 `tone-breathe`
+        ...(showsTone ? { ['--tone' as string]: toneColor(tone!) } : {}),
+      }}
       aria-label={`任务 ${task.title}`}
       title={tip}
       onClick={() => onSelect(task)}

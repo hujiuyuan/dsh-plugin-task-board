@@ -8,15 +8,16 @@
  * 返回会话那个按钮是**必须的**：这个面板占了中间那一栏，没有一条明确的回头路
  * 是不能接受的。宿主提供 `ctx.layout.selectPanel(null)` 就是「回到会话」本身。
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactElement } from 'react'
 import { deriveIntent } from '../derive'
 import type { SlotKit } from '../embed'
 import { useEnrichment } from '../enrich'
 import { buildIndex, lastExecution } from '../model'
-import { STATUS } from '../tokens'
+import { COLUMN, COLUMN_WRITE_STATUS, STATUS, type ColumnId } from '../tokens'
 import type { TaskRecord, TaskStatus } from '../types'
 import type { TaskSource } from '../data'
-import { tasksFromSessions, takenSessionIds, useSessionRows } from '../sessions'
+import { tasksFromSessions, takenSessionIds, useSessionCatalog } from '../sessions'
+import { useSignals } from '../signals'
 import { transcriptForModel, useTranscript } from '../session'
 import { useWorkspaces } from '../workspaces'
 import { useBoardWrite, useScheduleReady } from '../write'
@@ -72,24 +73,31 @@ export function Panel({ ctx, source, kit }: PanelProps) {
    * 顺序反过来会变成「会话的工作区看不见」。
    */
   const ledgerIndex = useMemo(() => buildIndex(source.snapshot.tasks), [source.snapshot.tasks])
-  const sessionRows = useSessionRows(ctx)
+  const catalog = useSessionCatalog(ctx)
+  const sessionRows = catalog.rows
   const workspaceIds = useMemo(
     () => [...new Set(ledgerIndex.onBoard.map(task => task.workspaceId ?? ''))],
     [ledgerIndex.onBoard],
   )
   const sessionPaths = useMemo(
-    () => [...new Set(sessionRows.map(row => row.cwd ?? '').filter(path => path.length > 0))],
+    () => [...new Set(sessionRows.map(row => row.cwd).filter((path): path is string => typeof path === 'string' && path.length > 0))],
     [sessionRows],
   )
   const workspaces = useWorkspaces(ctx, workspaceIds, sessionPaths)
 
+  /**
+   * 会话的处境。**要放在索引之前** —— 归档过哪些会话是 `tasksFromSessions`
+   * 的输入之一（归档的会话要落到「归档」列，而不是混在待审阅里）。
+   */
+  const signals = useSignals(ctx, { ids: catalog.ids, updatedAt: catalog.updatedAt, parents: catalog.parents })
+
   const index = useMemo(() => {
     const taken = takenSessionIds(source.snapshot.tasks)
-    const sessionTasks = tasksFromSessions(sessionRows, taken, workspaces)
+    const sessionTasks = tasksFromSessions(sessionRows, taken, workspaces, signals.archives, signals.pending)
     return sessionTasks.length === 0
       ? ledgerIndex
       : buildIndex([...source.snapshot.tasks, ...sessionTasks])
-  }, [ledgerIndex, sessionRows, source.snapshot.tasks, workspaces])
+  }, [ledgerIndex, sessionRows, source.snapshot.tasks, workspaces, signals.archives, signals.pending])
 
   const enrichment = useEnrichment(ctx)
   const write = useBoardWrite()
@@ -154,7 +162,18 @@ export function Panel({ ctx, source, kit }: PanelProps) {
    * 不做乐观更新：卡的位置由看板的数据说了算，自己先挪一下再被事实推翻，
    * 看起来就像插件在抽风。
    */
-  const moveTask = (task: TaskRecord, status: TaskStatus): void => {
+  /**
+   * 拖到某一列。**合并过的列在这儿落地。**
+   *
+   * 「待规划」和「待办」在界面是一列，写下去只有 `todo` 一个值 ——
+   * 一张原本 `backlog` 的卡会被这一拖升成「可跑」。这是合并列的必然代价，
+   * 已经跟用户说过。
+   *
+   * 「归档」不走这里：它不是一个状态，是另一个动作（`onArchive`）。
+   */
+  const moveTask = (task: TaskRecord, column: ColumnId): void => {
+    const status = COLUMN_WRITE_STATUS[column]
+    if (status === undefined) return
     void (async () => {
       const result = await write.send({ op: 'status', taskId: task.id, status })
       if (!result.ok) {
@@ -163,7 +182,35 @@ export function Panel({ ctx, source, kit }: PanelProps) {
         setToast({ text: `没挪成：${result.error}`, tone: 'err' })
         return
       }
-      setToast({ text: `「${task.title}」挪到「${STATUS[status].label}」了`, tone: 'ok' })
+      setToast({ text: `「${task.title}」挪到「${COLUMN[column].label}」了`, tone: 'ok' })
+    })()
+  }
+
+  /**
+   * 收工 / 撤销收工。
+   *
+   * **两条完全不同的路**，因为「归档」在两种东西上根本不是一回事：
+   *   - 卡：走看板账本的 `archivedAt`，得发一次看板的同源 action（跟排期同一条路，
+   *     因为扩展面的 `host.tasks` 上**没有**归档这个动作）。
+   *   - 会话：账本里没有会话这种东西，写的是我们自己那份记录。
+   *
+   * 分开写而不是混在一个函数里猜，是因为它们失败的后果不一样：卡归档失败是
+   * 看板拒绝（跑着的卡不许归档），会话归档失败基本只会是我们自己的文件写不进去。
+   */
+  const archiveTask = (task: TaskRecord, archived: boolean): void => {
+    void (async () => {
+      if (task.fromSession !== undefined) {
+        const error = await signals.setArchived(task.fromSession, archived)
+        if (error !== null) setToast({ text: `没收成：${error}`, tone: 'err' })
+        else setToast({ text: archived ? `「${task.title}」收工了` : `「${task.title}」又摆回待审阅了`, tone: 'ok' })
+        return
+      }
+      const result = await write.send({ op: archived ? 'archive' : 'restore', taskId: task.id })
+      if (!result.ok) {
+        setToast({ text: `没收成：${result.error}`, tone: 'err' })
+        return
+      }
+      setToast({ text: archived ? `「${task.title}」收工了` : `「${task.title}」撤销归档了`, tone: 'ok' })
     })()
   }
 
@@ -245,7 +292,7 @@ export function Panel({ ctx, source, kit }: PanelProps) {
       </header>
 
       <div className="page">
-        <Banner source={source} />
+        <Banner source={source} factsWhy={signals.factsWhy} statusWhy={signals.statusWhy} />
 
         <section className="view" aria-label="看板视图" hidden={view !== 'board'}>
           {view === 'board' ? (
@@ -260,6 +307,8 @@ export function Panel({ ctx, source, kit }: PanelProps) {
               onOpenBoard={openBoard}
               canMove={write.ready}
               onMove={moveTask}
+              onArchive={archiveTask}
+              signals={signals}
             />
           ) : null}
         </section>
@@ -384,12 +433,45 @@ function SourceBadge({ source }: { source: TaskSource }) {
  * 这条不能省：用户看到的是同一张看板，但一份会实时变、一份不会——
  * 不说明白的话，他会以为插件坏了。
  */
-function Banner({ source }: { source: TaskSource }) {
+function Banner({ source, factsWhy, statusWhy }: { source: TaskSource; factsWhy: string | null; statusWhy: string | null }) {
   const { snapshot } = source
-  if (snapshot.kind === 'board') return null
+
+  /*
+   * 「上一轮怎么结束的」读不出来 —— **要说出来，不能静悄悄少一层颜色**。
+   *
+   * 这一条跟别的降级不太一样：界面看起来一模一样（列、排序、筛选全都在），
+   * 少的只是卡片边框上那几个颜色。用户不会发现，但他做判断的依据少了一样。
+   * 所以它排在最前面，而且跟数据源那条横幅是两件事、可以同时出现。
+   */
+  const facts = (
+    <>
+      {statusWhy === null ? null : (
+        <div className="banner" role="status">
+          <WarnIcon />
+          <span>
+            读不到宿主正在推的会话状态，所以**「AI 在等你」这一类看不见了** ——
+            谁在等权限、谁在提问、谁跑完没看，都认不出来。列、排序、筛选照常。
+            原因：{statusWhy}
+          </span>
+        </div>
+      )}
+      {factsWhy === null ? null : (
+        <div className="banner" role="status">
+          <WarnIcon />
+          <span>
+            读不出每个会话「上一轮是怎么结束的」，所以卡片上没有颜色标记。
+            其余一切照常 —— 列、排序、筛选都不受它影响。原因：{factsWhy}
+          </span>
+        </div>
+      )}
+    </>
+  )
+
+  if (snapshot.kind === 'board') return facts
+  const withFacts = (data: ReactElement | null): ReactElement | null => <>{facts}{data}</>
 
   if (snapshot.kind === 'unavailable' && snapshot.reason === 'starting') {
-    return <div className="banner" role="status">正在找数据…先问任务看板，问不到再读账本。</div>
+    return withFacts(<div className="banner" role="status">正在找数据…先问任务看板，问不到再读账本。</div>)
   }
 
   if (snapshot.kind === 'unavailable') {
@@ -398,7 +480,7 @@ function Banner({ source }: { source: TaskSource }) {
       : snapshot.reason === 'schema-mismatch'
         ? `账本格式对不上：文件里是第 ${snapshot.schema?.actual ?? '未知'} 代，本插件认得第 ${(snapshot.schema?.supported ?? []).join(' / ') || '未知'} 代。不猜字段，所以什么都不画 —— 升级本插件，或者把任务看板退回到那一代。`
       : '任务看板没在场，账本也读不到。'
-    return (
+    return withFacts(
       <div className="banner" role="status">
         <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" aria-hidden="true">
           <path d="M8 2.4 14.2 13H1.8z" />
@@ -409,21 +491,28 @@ function Banner({ source }: { source: TaskSource }) {
           {text}
           {snapshot.path !== undefined ? <> <span className="mono">{snapshot.path}</span></> : null}
         </span>
-      </div>
+      </div>,
     )
   }
 
-  return (
+  return withFacts(
     <div className="banner" role="status">
-      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" aria-hidden="true">
-        <path d="M8 2.4 14.2 13H1.8z" />
-        <path d="M8 6.4v3.1" strokeLinecap="round" />
-        <path d="M8 11.3v.6" strokeLinecap="round" />
-      </svg>
+      <WarnIcon />
       <span>
         任务看板未挂载 —— 以下数据读自 <span className="mono">$DSH_HOME/task-board/ledger-v2.json</span>
         {' '}快照（schemaVersion {snapshot.schemaVersion ?? '未知'}），不含实时事件。
       </span>
-    </div>
+    </div>,
+  )
+}
+
+/** 降级横幅上那个三角警告。三处一模一样，抽出来免得哪天改一处漏两处。 */
+function WarnIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" aria-hidden="true">
+      <path d="M8 2.4 14.2 13H1.8z" />
+      <path d="M8 6.4v3.1" strokeLinecap="round" />
+      <path d="M8 11.3v.6" strokeLinecap="round" />
+    </svg>
   )
 }
