@@ -14,6 +14,7 @@
  */
 import { CSS, STYLE_ID } from './styles'
 import { useTaskSource } from './data'
+import type { SlotKit } from './embed'
 import { Panel } from './views/Panel'
 
 export const name = 'dsh-plugin-task-board'
@@ -68,9 +69,9 @@ function installStyles(): () => void {
 }
 
 /** 页面本体。数据源在这里解析一次，三个视图共用同一份。 */
-function PlanPage({ ctx }: { ctx: any }) {
+function PlanPage({ ctx, kit }: { ctx: any; kit: SlotKit }) {
   const source = useTaskSource(ctx)
-  return <Panel ctx={ctx} source={source} />
+  return <Panel ctx={ctx} source={source} kit={kit} />
 }
 
 export function apply(ctx: any): () => void {
@@ -96,9 +97,13 @@ export function apply(ctx: any): () => void {
     ),
   )
 
-  // 宿主把注册的组件当普通 React 组件渲染，多出来的 kit props（t / renderSlot …）
-  // 我们一个都不用，只需要闭包里那个 ctx——数据源要靠它去问任务看板。
-  const MainPage = () => <PlanPage ctx={ctx} />
+  /**
+   * 宿主把注册的组件当普通 React 组件渲染，kit props 里我们**只用两个**：
+   * `renderFactorySlot` 和 `SessionProvider`（见 `embed.tsx`）。
+   * 别的（t / useStore / renderSlot…）一个都不碰 —— 用得越多，
+   * 宿主改版时被带下去的面就越大。
+   */
+  const MainPage = (kit: any) => <PlanPage ctx={ctx} kit={kit ?? {}} />
 
   disposers.push(
     slots.inject('main', () =>
@@ -106,6 +111,19 @@ export function apply(ctx: any): () => void {
         {
           name: 'main',
           key: PANEL_ID,
+          /**
+           * 声明一个 session 作用域的子座位。
+           *
+           * **我们一个组件都不往里注册** —— 它在这里的唯一作用是让渲染器
+           * 把 `SessionProvider` 发给我们（那是个有条件的 kit prop：
+           * 注册的座位声明了非 root 的子座位才发）。
+           *
+           * 会话身份只能从渲染位置继承，factory 本身不吃 sessionId，
+           * 所以要嵌宿主的会话页就必须先拿到这个东西。见 `embed.tsx` 的长注释。
+           */
+          children: {
+            [`${PANEL_ID}.session`]: { kind: 'single', scope: 'session' },
+          },
         },
         MainPage as never,
       ),

@@ -1685,6 +1685,14 @@ body[data-ds-dark-theme] .dsptb .tagpick button[aria-pressed="true"]{color:hsl(v
 /* 被拒绝的那颗提示条换个色。同一个位置、同一句话，红的是「没成」。 */
 .dsptb .toast.err{border-color:var(--state-error);color:var(--state-error)}
 
+/* 内嵌的宿主会话页。高度**必须定死**：宿主那套布局是「消息区 flex:1 + 底部输入框」，
+   不给高度它会把自己压成一条线。定死 + overflow:hidden，抽屉的滚动条就只属于抽屉。 */
+.dsptb .embed-frame{
+  height:min(560px,58vh);display:flex;flex-direction:column;min-height:0;
+  border:1px solid var(--border-l2);border-radius:10px;overflow:hidden;
+  background:var(--bg-base);
+}
+
 /* 「会话」那一页正在看的那一次执行，在这一列里标出来 */
 .dsptb .d-ex.on{border-color:var(--brand);background:var(--bg-layer-2)}
 .dsptb .d-ex .cur-mark{

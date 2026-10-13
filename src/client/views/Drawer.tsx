@@ -11,6 +11,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { STATUS, hueOf } from '../tokens'
 import type { Intent, Override } from '../derive'
 import { PRIORITY_LABEL } from '../derive'
+import { EmbeddedConversation, type SlotKit } from '../embed'
 import type { Enrichment } from '../enrich'
 import type { TaskIndex } from '../model'
 import { durationOf, humanCron, humanDuration, isRunning, lastExecution, outcomeLabel, rollupOf, shortTime, spanEnd, triggerOf } from '../model'
@@ -41,6 +42,9 @@ interface DrawerProps {
   transcript: Transcript
   /** 同一份内容，掐好长度给模型用。没有会话时是 undefined。 */
   transcriptText?: string
+  /** 座位给的 kit props —— 嵌宿主会话页要靠它。 */
+  kit: SlotKit
+  ctx: any
 }
 
 /** 这个任务该用哪个模型：它自己绑的优先，没绑就用页面上选中的那个。 */
@@ -48,7 +52,7 @@ function modelFor(task: TaskRecord, fallback: string | null): string | null {
   return task.model !== undefined && task.model.length > 0 ? task.model : fallback
 }
 
-export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOpenSession, intent, enrichment, write, onEdit, transcript, transcriptText }: DrawerProps) {
+export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOpenSession, intent, enrichment, write, onEdit, transcript, transcriptText, kit, ctx }: DrawerProps) {
   const [tab, setTab] = useState<Tab>('conversation')
   const [copied, setCopied] = useState(false)
 
@@ -78,6 +82,13 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
     { id: 'schedule', label: '定时历史', count: task.executions.length },
   ]
   const active = tabs.find(item => item.id === tab)!
+
+  /**
+   * 能不能把宿主的会话页嵌进来。两个 kit prop 缺一个都不行 ——
+   * 它们在宿主那里是**有条件发放**的（`SessionProvider` 只在我们声明了
+   * session 子座位时才给），所以缺了不是异常，是「这个外壳组合没给」。
+   */
+  const canEmbed = typeof kit.renderFactorySlot === 'function' && typeof kit.SessionProvider === 'function'
 
   const openSession = (): void => {
     if (last?.sessionId === undefined) return
@@ -161,11 +172,36 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
 
               {last?.sessionId === undefined ? null : (
                 <div className="d-sec" style={{ marginTop: 16 }}>
-                  <div className="d-sec-head">
-                    <h3>这次跑了什么</h3>
-                    <span className="view-note" style={{ marginLeft: 'auto' }}>只读，不是宿主的会话页</span>
-                  </div>
-                  <TranscriptView transcript={transcript} />
+                  {canEmbed ? (
+                    <EmbeddedConversation
+                      ctx={ctx}
+                      sessionId={last.sessionId}
+                      kit={kit}
+                      available={canEmbed}
+                      fallback={why => (
+                        <>
+                          <div className="d-sec-head">
+                            <h3>这次跑了什么</h3>
+                            <span className="view-note" style={{ marginLeft: 'auto' }}>只读，不是宿主的会话页</span>
+                          </div>
+                          {/* 嵌不进来说清为什么，别让人以为是我们不想做 */}
+                          <p className="view-note" style={{ marginBottom: 8 }}>{why}，下面是本插件自己读的只读记录。</p>
+                          <TranscriptView transcript={transcript} />
+                        </>
+                      )}
+                    />
+                  ) : (
+                    <>
+                      <div className="d-sec-head">
+                        <h3>这次跑了什么</h3>
+                        <span className="view-note" style={{ marginLeft: 'auto' }}>只读，不是宿主的会话页</span>
+                      </div>
+                      <p className="view-note" style={{ marginBottom: 8 }}>
+                        这个部署没给到渲染会话页需要的东西（座位的 kit props），下面是本插件自己读的只读记录。
+                      </p>
+                      <TranscriptView transcript={transcript} />
+                    </>
+                  )}
                 </div>
               )}
             </div>

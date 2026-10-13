@@ -10,6 +10,7 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import { deriveIntent } from '../derive'
+import type { SlotKit } from '../embed'
 import { useEnrichment } from '../enrich'
 import { buildIndex, lastExecution } from '../model'
 import { STATUS } from '../tokens'
@@ -38,9 +39,11 @@ const TICK_MS = 30_000
 interface PanelProps {
   ctx: any
   source: TaskSource
+  /** 座位给的那把 kit props。抽屉要靠它嵌宿主的会话页，见 `embed.tsx`。 */
+  kit: SlotKit
 }
 
-export function Panel({ ctx, source }: PanelProps) {
+export function Panel({ ctx, source, kit }: PanelProps) {
   const [view, setView] = useState<View>('board')
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined)
   const [now, setNow] = useState(() => Date.now())
@@ -278,6 +281,8 @@ export function Panel({ ctx, source }: PanelProps) {
           write={write}
           onEdit={() => setForm('edit')}
           transcript={transcript}
+          kit={kit}
+          ctx={ctx}
           {...(transcriptText === undefined ? {} : { transcriptText })}
         />
       ) : null}
