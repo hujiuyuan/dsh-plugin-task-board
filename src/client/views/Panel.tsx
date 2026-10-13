@@ -12,7 +12,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { deriveIntent } from '../derive'
 import { useEnrichment } from '../enrich'
 import { buildIndex, lastExecution } from '../model'
-import type { TaskRecord } from '../types'
+import { STATUS } from '../tokens'
+import type { TaskRecord, TaskStatus } from '../types'
 import type { TaskSource } from '../data'
 import { transcriptForModel, useTranscript } from '../session'
 import { useWorkspaces } from '../workspaces'
@@ -49,7 +50,8 @@ export function Panel({ ctx, source }: PanelProps) {
   const [resetToken, setResetToken] = useState(0)
   /** 表单开着的时候是新建（`'new'`）还是编辑某一张卡。 */
   const [form, setForm] = useState<'new' | 'edit' | undefined>(undefined)
-  const [toast, setToast] = useState<string | undefined>(undefined)
+  /** `err` 那颗是「没成」。同一句话，颜色不一样，人不看字也知道结果。 */
+  const [toast, setToast] = useState<{ text: string; tone: 'ok' | 'err' } | undefined>(undefined)
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), TICK_MS)
@@ -109,6 +111,27 @@ export function Panel({ ctx, source }: PanelProps) {
     autoEnrich([selected], transcriptText)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTaskId, transcript.state])
+
+  /**
+   * 拖一张卡换列。
+   *
+   * 这里**不做任何预判**（跑着的能不能移、这张卡归谁管），一律交给看板去判，
+   * 它拒绝时把原话显示出来 —— 它对那张卡的了解比这张界面多。
+   * 不做乐观更新：卡的位置由看板的数据说了算，自己先挪一下再被事实推翻，
+   * 看起来就像插件在抽风。
+   */
+  const moveTask = (task: TaskRecord, status: TaskStatus): void => {
+    void (async () => {
+      const result = await write.send({ op: 'status', taskId: task.id, status })
+      if (!result.ok) {
+        // 原因跟着结果回来，不读 `write.error` —— 那是个 state，
+        // await 回来时还是上一轮的值
+        setToast({ text: `没挪成：${result.error}`, tone: 'err' })
+        return
+      }
+      setToast({ text: `「${task.title}」挪到「${STATUS[status].label}」了`, tone: 'ok' })
+    })()
+  }
 
   const backToConversation = (): void => {
     try {
@@ -200,6 +223,8 @@ export function Panel({ ctx, source }: PanelProps) {
               onClearAll={clearAll}
               sourceKind={source.snapshot.kind}
               onOpenBoard={openBoard}
+              canMove={write.ready}
+              onMove={moveTask}
             />
           ) : null}
         </section>
@@ -268,14 +293,14 @@ export function Panel({ ctx, source }: PanelProps) {
           onClose={() => { write.clearError(); setForm(undefined) }}
           onDone={(message, openId) => {
             setForm(undefined)
-            setToast(message)
+            setToast({ text: message, tone: 'ok' })
             if (openId !== undefined) setSelectedId(openId)
           }}
         />
       ) : null}
 
       {toast !== undefined ? (
-        <div className="toast show" role="status">{toast}</div>
+        <div className={`toast show${toast.tone === 'err' ? ' err' : ''}`} role="status">{toast.text}</div>
       ) : null}
     </div>
   )

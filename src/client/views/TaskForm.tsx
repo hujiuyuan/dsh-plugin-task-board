@@ -102,11 +102,11 @@ export function TaskForm({ editing, index, workspaces, write, defaultWorkspaceId
           taskId: editing.id,
           patch: { title: title.trim(), description, prompt },
         })
-        if (result === null) return
+        if (!result.ok) return
       }
       if (status !== editing.status) {
         const result = await write.send({ op: 'status', taskId: editing.id, status })
-        if (result === null) return
+        if (!result.ok) return
       }
       onDone(contentChanged || status !== editing.status ? '改好了' : '什么都没改', editing.id)
       return
@@ -123,7 +123,7 @@ export function TaskForm({ editing, index, workspaces, write, defaultWorkspaceId
         ...(parentId.length > 0 ? { parentId } : {}),
       },
     })
-    if (result === null) return
+    if (!result.ok) return
     onDone(`建好了：${title.trim()}`, result.id)
   }
 

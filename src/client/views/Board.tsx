@@ -42,9 +42,25 @@ interface BoardProps {
   sourceKind: 'board' | 'ledger' | 'unavailable'
   /** 去任务看板建卡。只有看板在场时才给 —— 否则那是让人去一个不存在的地方。 */
   onOpenBoard?: () => void
+  /**
+   * 能不能拖卡片换列。**没有写入口时一律不能** —— 账本兜底读来的数据拖了也白拖，
+   * 而且会让人以为插件把卡弄丢了。给 false 的时候连 `draggable` 都不挂，
+   * 卡片根本不会出现「可以拖」的手感。
+   */
+  canMove?: boolean
+  /** 拖到某一列。真去写、以及把结果告诉用户，都是父级的事。 */
+  onMove?: (task: TaskRecord, status: TaskStatus) => void
 }
 
-export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll, sourceKind, onOpenBoard }: BoardProps) {
+export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll, sourceKind, onOpenBoard, canMove = false, onMove }: BoardProps) {
+  /**
+   * 正在拖的那张卡 / 悬停在哪一列。
+   *
+   * 这两个都不进 props、也不进账本 —— 它们是**手指的位置**，不是数据。
+   * 移交的动作由 `onMove` 交出去，父级再把结果变成一句 toast。
+   */
+  const [dragging, setDragging] = useState<TaskRecord | undefined>(undefined)
+  const [over, setOver] = useState<TaskStatus | undefined>(undefined)
   const [filters, setFilters] = useState<Record<TaskStatus, ColFilter>>(() => ({
     backlog: EMPTY_FILTER, todo: EMPTY_FILTER, running: EMPTY_FILTER, done: EMPTY_FILTER, failed: EMPTY_FILTER,
   }))
@@ -106,6 +122,14 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
     return out
   }, [columns, filters])
 
+  /** 一张卡要的全部 props。两处渲染点（平铺 / 按天分组）共用，免得改了这处漏那处。 */
+  const cardProps = (task: TaskRecord) => ({
+    task, index, now, workspaces, selectedId, onSelect, canMove,
+    dragging: dragging?.id === task.id,
+    onDragBegin: setDragging,
+    onDragEnd: () => setDragging(undefined),
+  })
+
   const anyFilter = STATUS_ORDER.some(status => {
     const filter = filters[status]
     return filter.ws !== '' || filter.q.trim().length > 0 || filter.trig !== 'all'
@@ -157,8 +181,42 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
         const restCount = rest.reduce((sum, group) => sum + group.items.length, 0)
         const restWorkdays = rest.filter(group => !group.weekend).length
 
+        // 拖着自己原来那一列不算「有地方可放」：接收了也只是原地不动，
+        // 高亮起来反而是在承诺一件不会发生的事
+        const droppable = canMove && dragging !== undefined && dragging.status !== status
+
         return (
-          <section className="col" key={status} aria-label={meta.label}>
+          <section
+            className={`col${over === status && droppable ? ' drop-on' : ''}`}
+            key={status}
+            aria-label={meta.label}
+            onDragOver={canMove
+              ? event => {
+                  // 不 preventDefault 的话浏览器不认这是放置区，drop 根本不会触发
+                  event.preventDefault()
+                  event.dataTransfer.dropEffect = 'move'
+                  setOver(status)
+                }
+              : undefined}
+            onDragLeave={canMove
+              ? event => {
+                  // 移到自己的子元素上也会触发 dragleave。不排掉的话，
+                  // 鼠标从列的空白处挪到卡片上，整列的高亮就闪一下没了
+                  if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
+                  setOver(current => (current === status ? undefined : current))
+                }
+              : undefined}
+            onDrop={canMove
+              ? event => {
+                  event.preventDefault()
+                  const task = dragging
+                  setOver(undefined)
+                  setDragging(undefined)
+                  if (task === undefined || onMove === undefined || task.status === status) return
+                  onMove(task, status)
+                }
+              : undefined}
+          >
             <div className="col-head" title={`${meta.label}\n${meta.desc}\n\n由谁设置：${meta.by}\n${meta.tip}`}>
               <span className="hdot" style={{ background: meta.css }} />
               <h3>{meta.label}</h3>
@@ -237,7 +295,7 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
                 </p>
               ) : shown === undefined ? (
                 items.map(task => (
-                  <Card key={task.id} {...{ task, index, now, workspaces, selectedId, onSelect }} />
+                  <Card key={task.id} {...cardProps(task)} />
                 ))
               ) : (
                 <>
@@ -265,7 +323,7 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
                         </div>
                         {open
                           ? group.items.map(task => (
-                              <Card key={task.id} {...{ task, index, now, workspaces, selectedId, onSelect }} />
+                              <Card key={task.id} {...cardProps(task)} />
                             ))
                           : null}
                       </div>
@@ -316,13 +374,18 @@ interface CardProps {
   workspaces: WorkspaceIndex
   selectedId: string | undefined
   onSelect: (task: TaskRecord) => void
+  /** 能拖的话把这两个给下来。`canMove` 为假时一个都不挂。 */
+  canMove: boolean
+  dragging: boolean
+  onDragBegin: (task: TaskRecord) => void
+  onDragEnd: () => void
 }
 
 /**
  * 一张卡。**四行永远都渲染**（没内容就是空 div）——少一行的话 grid 会把后面的
  * 提上来，「第几行是什么」这条对齐就断了。
  */
-function Card({ task, index, now, workspaces, selectedId, onSelect }: CardProps) {
+function Card({ task, index, now, workspaces, selectedId, onSelect, canMove, dragging, onDragBegin, onDragEnd }: CardProps) {
   const rollup = useMemo(() => rollupOf(index, task), [index, task])
   const last = lastExecution(task)
   const running = last !== undefined && last.endedAt === undefined
@@ -348,13 +411,28 @@ function Card({ task, index, now, workspaces, selectedId, onSelect }: CardProps)
     task.title,
     `${task.id} · ${wsName} · ${STATUS[task.status].label}`,
     task.description.length > 0 ? task.description : undefined,
+    // 说在动手之前。跑到一半的卡移不动是看板的规矩，等拖完再弹一句「不行」
+    // 是把一句话该在前面的信息放到了后面
+    canMove && running ? '跑着的时候移不动：锁属于那次执行，不属于这一列的名字' : undefined,
+    canMove ? '拖到别的列可以换状态' : undefined,
   ].filter(Boolean).join('\n')
 
   return (
     <article
-      className={`card${running ? ' is-running' : ''}${task.id === selectedId ? ' on' : ''}`}
+      className={`card${running ? ' is-running' : ''}${task.id === selectedId ? ' on' : ''}${dragging ? ' is-dragging' : ''}${canMove ? ' can-move' : ''}`}
       role="button"
       tabIndex={0}
+      draggable={canMove}
+      onDragStart={canMove
+        ? event => {
+            // 必须塞一点数据，不然 Firefox 系不认这是一次拖拽。
+            // 真正用的是 state 里那张卡 —— dataTransfer 在 dragover 阶段读不到
+            event.dataTransfer.setData('text/plain', task.id)
+            event.dataTransfer.effectAllowed = 'move'
+            onDragBegin(task)
+          }
+        : undefined}
+      onDragEnd={canMove ? () => onDragEnd() : undefined}
       style={{ ['--bar' as string]: barColor(last) }}
       aria-label={`任务 ${task.title}`}
       title={tip}

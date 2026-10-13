@@ -347,6 +347,23 @@ const TAIL = `
 }
 .dsptb .tr-assistant .tr-body{color:var(--label-secondary)}
 
+/* ── 拖卡片换列 ────────────────────────────────────────────────────────
+   原型里没有拖拽（它没有任何改状态的入口），这一节是接上写入口之后新加的。 */
+/* 鼠标的手感。**只在能写的时候挂** —— 账本兜底读来的数据拖了也白拖，
+   给出「可拖」的手感等于在骗人。 */
+.dsptb .card.can-move{cursor:grab}
+.dsptb .card.can-move:active{cursor:grabbing}
+/* 正在拖的那张：半透明留在原地，让人还看得见它是从哪来的 */
+.dsptb .card.is-dragging{opacity:.4}
+/* 能放的列整列亮起来。**整列而不只是卡片区** —— 往列的空白处松手也得算数 */
+.dsptb .col.drop-on{
+  background:var(--interactive-bg-hover);
+  box-shadow:inset 0 0 0 1px var(--brand);
+  border-radius:10px;
+}
+/* 被拒绝的那颗提示条换个色。同一个位置、同一句话，红的是「没成」。 */
+.dsptb .toast.err{border-color:var(--state-error);color:var(--state-error)}
+
 /* 「会话」那一页正在看的那一次执行，在这一列里标出来 */
 .dsptb .d-ex.on{border-color:var(--brand);background:var(--bg-layer-2)}
 .dsptb .d-ex .cur-mark{

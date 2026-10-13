@@ -42,9 +42,16 @@ export interface BoardWrite {
   /** 上一次写失败的原因。看板拒绝时给的是它的原话。 */
   error: string | null
   clearError: () => void
-  /** 成功返回新任务 id（create）或 true。失败返回 null，原因在 `error` 里。 */
-  send: (action: WriteOp) => Promise<{ id?: string } | null>
+  /**
+   * 失败时**把原因跟着结果一起返回**，不指望调用方事后去读 `error` ——
+   * 那是个 state，`await` 回来的时候还是上一轮的值，读到的是错的。
+   */
+  send: (action: WriteOp) => Promise<WriteResult>
 }
+
+export type WriteResult =
+  | { ok: true; id?: string }
+  | { ok: false; error: string }
 
 export function useBoardWrite(): BoardWrite {
   const [ready, setReady] = useState(false)
@@ -72,7 +79,7 @@ export function useBoardWrite(): BoardWrite {
     return () => { alive = false }
   }, [])
 
-  const send = useCallback(async (action: WriteOp) => {
+  const send = useCallback(async (action: WriteOp): Promise<WriteResult> => {
     setBusy(true)
     setError(null)
     try {
@@ -83,13 +90,15 @@ export function useBoardWrite(): BoardWrite {
       })
       const body = await response.json()
       if (body?.ok !== true) {
-        setError(String(body?.detail ?? '写失败'))
-        return null
+        const error = String(body?.detail ?? '写失败')
+        setError(error)
+        return { ok: false, error }
       }
-      return { id: typeof body.task?.id === 'string' ? body.task.id : undefined }
+      return { ok: true, id: typeof body.task?.id === 'string' ? body.task.id : undefined }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
-      return null
+      const error = cause instanceof Error ? cause.message : String(cause)
+      setError(error)
+      return { ok: false, error }
     } finally {
       setBusy(false)
     }
