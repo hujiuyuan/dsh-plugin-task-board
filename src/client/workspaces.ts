@@ -26,8 +26,20 @@ export interface WorkspaceIndex {
   abbrOf: (id: string | undefined) => string
   /** 工作区路径，没钉的没有。 */
   pathOf: (id: string | undefined) => string | undefined
-  /** 界面上出现过的全部工作区，已钉的按名字排，未钉的永远最后。 */
+  /**
+   * 筛选下拉里要列的工作区：**只列界面上真出现过的**。
+   * 空的列进筛选器没有意义（选了它必然一条都没有）。
+   */
   groups: string[]
+  /**
+   * 宿主认得**所有**工作区，不管有没有任务。
+   *
+   * 跟 `groups` 的区别正是「进度页按工作区」那一块要的：那里要的是一个
+   * 完整的仪表盘 —— 一个工作区一张卡，哪怕这张卡上全是零。
+   * 用 `groups` 的话，刚建好、还没往里放任务的工作区会整个消失，
+   * 看起来就像插件没读到它。
+   */
+  all: string[]
   ready: boolean
 }
 
@@ -103,7 +115,13 @@ export function useWorkspaces(ctx: any, ids: readonly string[]): WorkspaceIndex 
   const groups = [...seen].sort((a, b) => nameOf(a).localeCompare(nameOf(b), 'zh'))
   groups.push('')
 
-  return { nameOf, abbrOf, pathOf: id => (id === undefined ? undefined : byId.get(id)?.path), groups, ready: items.length > 0 }
+  // 清单拿不到（服务不在场）时退回「界面上出现过的那些」—— 那时我们本来也
+  // 不知道还有哪些工作区，总比画一个空的地方好
+  const all = (items.length > 0 ? items.map(item => item.id) : [...seen])
+    .filter(id => id.length > 0)
+    .sort((a, b) => nameOf(a).localeCompare(nameOf(b), 'zh'))
+
+  return { nameOf, abbrOf, pathOf: id => (id === undefined ? undefined : byId.get(id)?.path), groups, all, ready: items.length > 0 }
 }
 
 /** 全角算 2、半角算 1 的显示宽度。 */

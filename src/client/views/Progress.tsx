@@ -90,6 +90,26 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
     [effective.from, effective.to],
   )
 
+  /**
+   * 一个任务算不算进「这一期」的总数。
+   *
+   * **两处必须用同一个判据**：总览的「任务总数」和「按工作区」里各卡的总和
+   * 对不上的话，这一页就不能信了 —— 而它们对不上过：总览剔掉了子任务、
+   * 又按日期区间筛了，按工作区那边两样都没做。
+   */
+  const inScope = useMemo(() => {
+    const ended = (task: TaskRecord): boolean => task.status === 'done' || task.status === 'failed'
+    return (task: TaskRecord): boolean => {
+      // 子任务单独统计，不进总数（它在两边都进「子任务」那一格）
+      if (task.parentId !== undefined) return false
+      // 结束了的按「最后活动时间」判区间；还开着的一律计入 —— 它们本来就没结束，
+      // 按区间筛掉会得出「这段时间什么都没在做」这种假象
+      if (!ended(task)) return true
+      const at = spanEnd(task, now)
+      return at >= range.from && at <= range.to
+    }
+  }, [now, range])
+
   const stats = useMemo(() => {
     const count: Record<string, number> = {}
     for (const status of STATUS_ORDER) count[status] = 0
@@ -106,33 +126,50 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
         scheduled += 1
         if (task.schedule.enabled) scheduledOn += 1
       }
-      const ended = task.status === 'done' || task.status === 'failed'
-      if (ended) {
-        // 结束了的按「最后活动时间」判区间；还开着的一律计入 —— 它们本来就没结束，
-        // 按区间筛掉会得出「这段时间什么都没在做」这种假象
-        const at = spanEnd(task, now)
-        if (at < range.from || at > range.to) continue
-      }
+      if (!inScope(task)) continue
       total += 1
       count[task.status] += 1
     }
     return { count, total, scheduled, scheduledOn, bigTasks, subtasks }
-  }, [index.onBoard, now, range])
+  }, [index.onBoard, inScope])
 
-  const workspacesWithTasks = useMemo(() => {
-    const buckets = new Map<string, TaskRecord[]>()
+  /**
+   * 按工作区分桶。
+   *
+   * **每个宿主认得的工作区都出一张卡**，哪怕一条任务都没有 ——
+   * 这一页是仪表盘，一个刚建好、还没往里放任务的工作区整个消失，
+   * 看起来就像插件没读到它（真被这么问过）。
+   * 「未钉工作区」是例外：它是我们造出来的，没有任务就不该出现。
+   *
+   * 每一桶里的数**跟总览同一套口径**（`inScope`），所以各卡的数字加起来
+   * 正好等于上面的总数。这是这一页能不能被信的前提。
+   */
+  const byWorkspace = useMemo(() => {
+    type Bucket = { main: TaskRecord[]; scoped: TaskRecord[]; subtasks: number }
+    const empty = (): Bucket => ({ main: [], scoped: [], subtasks: 0 })
+    const buckets = new Map<string, Bucket>()
+    // 先把宿主认得的都摆上（一个任务都没有的也要有卡）
+    for (const id of workspaces.all) buckets.set(id, empty())
     for (const task of index.onBoard) {
       const key = task.workspaceId ?? ''
-      const bucket = buckets.get(key)
-      if (bucket === undefined) buckets.set(key, [task])
-      else bucket.push(task)
+      // **未钉的按需建桶**：它不在宿主清单里，所以上面没摆；真有未钉的任务时才出现。
+      // 这条以前写反了（`if (key === '') continue`），后果是所有没钉工作区的任务
+      // 在「按工作区」里整个消失，各卡加起来比总览少 —— 正是这个页面最不能出的错。
+      let bucket = buckets.get(key)
+      if (bucket === undefined) {
+        bucket = empty()
+        buckets.set(key, bucket)
+      }
+      if (task.parentId !== undefined) { bucket.subtasks += 1; continue }
+      bucket.main.push(task)
+      if (inScope(task)) bucket.scoped.push(task)
     }
     return [...buckets.entries()].sort((a, b) => {
       if (a[0] === '') return 1
       if (b[0] === '') return -1
       return workspaces.nameOf(a[0]).localeCompare(workspaces.nameOf(b[0]), 'zh')
     })
-  }, [index.onBoard, workspaces])
+  }, [index.onBoard, inScope, workspaces])
 
   const period = useMemo(() => buildPeriod(index.onBoard, now), [index.onBoard, now])
 
@@ -183,6 +220,11 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
       <p className="view-note">
         口径：已完成任务数 ÷ 总任务数 · 统计范围 {dayKey(effective.from)} ~ {dayKey(effective.to)} ·
         时间范围只筛已经结束的任务，还开着的（待规划 / 待办 / 进行中）永远计入 · 定时 / 大任务 / 子任务分别统计
+        <br />
+        {/* 这一句是**必须**的：这一页数的是任务卡，跟「开了几个会话」不是一回事 ——
+            一张卡可以跑很多次（每次一个会话），随手聊的会话也根本不挂卡。
+            不写清楚，两边一对不上就会以为插件数错了。 */}
+        这里数的是**任务卡**，不是会话：一张卡可以跑很多次，每跑一次是一个会话；随手开的会话也不一定有卡。
       </p>
 
       {stats.total === 0 ? (
@@ -257,12 +299,15 @@ export function Progress({ index, now, workspaces, onSelect, sourceKind }: Progr
 
       <div>
         <p className="p-secttl">按工作区 · 每个工作区一张卡</p>
+        <p className="view-note" style={{ marginTop: 4 }}>
+          空工作区也留一张卡（这张卡上的数跟上面同一套口径，加起来正好等于「任务总数」）。
+        </p>
         <div className="p-grid" style={{ marginTop: 8 }}>
-          {workspacesWithTasks.map(([id, tasks]) => (
+          {byWorkspace.map(([id, bucket]) => (
             <WorkspaceCard
               key={id || '__none__'}
               id={id}
-              tasks={tasks}
+              bucket={bucket}
               workspaces={workspaces}
               now={now}
               onSelect={onSelect}
@@ -376,16 +421,31 @@ function buildPeriod(
   return { week, month, lastFailed, unschedulable }
 }
 
+/** 一个工作区桶。口径跟总览同一套，见上面 `byWorkspace` 的注释。 */
+interface Bucket {
+  /** 这个工作区里全部主任务（不管日期区间）。 */
+  main: TaskRecord[]
+  /** 其中进了这一期统计的那些（总览「任务总数」的那一份）。 */
+  scoped: TaskRecord[]
+  subtasks: number
+}
+
 interface WorkspaceCardProps {
   id: string
-  tasks: TaskRecord[]
+  bucket: Bucket
   workspaces: WorkspaceIndex
   now: number
   onSelect: (task: TaskRecord) => void
 }
 
-function WorkspaceCard({ id, tasks, workspaces, now }: WorkspaceCardProps) {
+function WorkspaceCard({ id, bucket, workspaces, now }: WorkspaceCardProps) {
+  const { main, scoped, subtasks } = bucket
   const unpinned = id === ''
+  const scheduled = main.filter(task => task.schedule !== undefined).length
+  const scheduledOn = main.filter(task => task.schedule?.enabled === true).length
+  // 环、完成率、任务数都看**进了统计的那一份**；「大任务 / 定时」跟总览一样
+  // 不按区间筛，所以读 main
+  const tasks = scoped
   const count: Record<string, number> = {}
   for (const status of STATUS_ORDER) count[status] = 0
   for (const task of tasks) count[task.status] += 1
@@ -399,11 +459,13 @@ function WorkspaceCard({ id, tasks, workspaces, now }: WorkspaceCardProps) {
 
   // 工作区卡底部那行：原型写「本周目标 2/3」。真实数据里没有目标，
   // 但**有排期** —— 有排期就写「应跑 / 实跑」，没排期就只写实跑。
+  // 「本周跑动」看的是**这个工作区全部任务的本周执行**，不是 `scoped` 那一份 ——
+  // scoped 是问「这段时间完成了些什么」，跟「这周跑了几次」不是一回事
   const weekStart = startOfWeek(now)
-  const weekRuns = runsIn(tasks, weekStart, now)
+  const weekRuns = runsIn(main, weekStart, now)
   let expected = 0
   let computable = true
-  for (const task of tasks) {
+  for (const task of main) {
     if (task.schedule === undefined || !task.schedule.enabled) continue
     const want = expectedRuns(task.schedule.cron, weekStart, now)
     if (want === undefined) computable = false
@@ -464,20 +526,18 @@ function WorkspaceCard({ id, tasks, workspaces, now }: WorkspaceCardProps) {
       </div>
 
       <div className="p-break">
-        <span className="bk" title="有定时规则的任务，其中已启用的会自动触发">
+        <span className="bk" title="有定时规则的任务，其中已启用的会自动触发。不按上面的日期范围筛">
           <span className="k">定时</span>
-          <b>{tasks.filter(task => task.schedule !== undefined).length}</b>
-          {tasks.some(task => task.schedule?.enabled === true) ? (
-            <span className="sub">{tasks.filter(task => task.schedule?.enabled === true).length} 启用</span>
-          ) : null}
+          <b>{scheduled}</b>
+          {scheduledOn > 0 ? <span className="sub">{scheduledOn} 启用</span> : null}
         </span>
-        <span className="bk" title="大任务＝不带父任务的顶层任务">
+        <span className="bk" title="大任务＝不带父任务的顶层任务。不按上面的日期范围筛">
           <span className="k">大任务</span>
-          <b>{tasks.filter(task => task.parentId === undefined).length}</b>
+          <b>{main.length}</b>
         </span>
-        <span className="bk" title="子任务＝挂在大任务下面的任务">
+        <span className="bk" title="子任务＝挂在大任务下面的任务，单独统计、不进总数">
           <span className="k">子任务</span>
-          <b>{tasks.filter(task => task.parentId !== undefined).length}</b>
+          <b>{subtasks}</b>
         </span>
       </div>
 

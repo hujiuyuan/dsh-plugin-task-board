@@ -124,12 +124,79 @@ let final = rules
   })
   .join('\n')
 
+/**
+ * 导轨（`.rail-*`）那一整块是**死代码**，在这里就丢掉。
+ *
+ * 原型左边有一条导轨，这个插件改用顶栏了 —— 那些规则一条都不会命中。留着不只是
+ * 白占地方：里面还写死了 macOS 那三个窗口按钮的颜色（`#ff5f57` 之类），
+ * 而那正是「颜色必须走宿主令牌」这条规矩最容易被质疑的地方。
+ *
+ * 判据：**每个**逗号分出来的选择器里都出现 rail，才丢；只要有一个用到别处就留着。
+ */
+const railRules = []
+final = final.split('\n').filter(rule => {
+  const brace = rule.indexOf('{')
+  if (brace < 0) return true
+  const parts = rule.slice(0, brace).split(',').map(part => part.trim())
+  if (parts.length > 0 && parts.every(part => /\.rail/.test(part))) {
+    railRules.push(rule)
+    return false
+  }
+  return true
+}).join('\n')
+console.log('丢掉原型导轨的死规则:', railRules.length, '条')
+
 for (const [oldName, newName] of renamed) {
   final = final.replace(new RegExp(`(animation:\\s*[^;]*?)\\b${oldName}\\b`, 'g'), `$1${newName}`)
 }
 
 // 深色块的 `body[data-ds-dark-theme] ` 后面可能跟着 `@media` 里的东西，不该有
 final = final.replace(/body\[data-ds-dark-theme\] @/g, '@')
+
+/**
+ * 落在「强调底」上的字，**不能写死白色**。
+ *
+ * 原型里 `--brand` 是它自己定的一个蓝色，白字压得住。宿主不是：深色主题下
+ * `--dsw-alias-brand-primary` 本身就是近白色（bluish-50 #f9fafb），于是
+ * 「白底 + 白字」——选中项直接看不见。真出过这事（进度页那几个日期快捷按钮）。
+ *
+ * 宿主自己的 primary 按钮配的是 `--dsw-alias-label-primary-foreground`：
+ * 浅色主题下是白、深色主题下是近黑，正好跟着底色反过来。所以凡是
+ * 「底色是 brand / business-primary」又「写死白字」的规则，一律换成那个令牌。
+ */
+/**
+ * 几处原型写死的颜色，**按表换成宿主令牌**。
+ *
+ * 原型自己有固定色板，写死无所谓；宿主两套主题的值不一样，写死就在其中一套下出错。
+ * 这里是替换而不是在 TAIL 里覆盖：覆盖会留下两条互相打架的规则，
+ * 后来的人得自己去算哪条赢 —— 那正是这个文件想避免的东西。
+ */
+const SWAPS = [
+  // 主按钮悬停。原型写死一个更亮的蓝；宿主深色主题下主按钮是近白色，悬停还变蓝就跳戏
+  ['#5083ec', 'var(--brand-hover)'],
+  // 遮罩层（.mask 抽屉 / .mmask 模态框），宿主有专门的遮罩令牌，浅深各一个值
+  ['#00000059', 'var(--dsw-alias-bg-mask-1)'],
+  ['#0f111529', 'var(--dsw-alias-bg-mask-1)'],
+  // 执行记录里那句备注的暗红字
+  ['#a51d1d', 'var(--state-error)'],
+]
+let swapped = 0
+for (const [from, to] of SWAPS) {
+  const before = final.length
+  final = final.split(from).join(to)
+  if (final.length !== before) swapped += 1
+}
+console.log('写死的颜色换成令牌:', swapped, '/', SWAPS.length, '种')
+
+let recolored = 0
+final = final.replace(/\{([^{}]*)\}/g, (block, body) => {
+  if (/(^|;)\s*color\s*:\s*#fff\s*(;|$)/.test(body) && /background\s*:\s*var\(--(brand|business-primary)\)/.test(body)) {
+    recolored += 1
+    return `{${body.replace(/(^|;)(\s*)color\s*:\s*#fff(\s*)(;|$)/, '$1$2color:var(--on-accent)$3$4')}}`
+  }
+  return block
+})
+console.log('强调底上的白字换成令牌:', recolored, '条')
 
 writeFileSync('/tmp/dsptb-ref/ported.css', final)
 console.log('规则条数:', rules.length - 1)
@@ -169,6 +236,8 @@ const ALIAS = `/* ═══════════════ 令牌别名 ═
   --warn-bg:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#f59e0b) 12%,transparent);
   --warn-border:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#f59e0b) 35%,transparent);
   --warn-fg:var(--dsw-alias-state-warn-label,#f5c26b);
+  --on-accent:var(--dsw-alias-label-primary-foreground,#fff);
+  --brand-hover:var(--dsw-alias-button-primary-hover,#43454a);
   --shadow-card:var(--dsw-shadow-lv2,0 4px 14px #00000059);
   --shadow-pop:var(--dsw-shadow-lv3,0 12px 32px #00000073);
 }
@@ -288,6 +357,12 @@ const TAIL = `
 .dsptb .acc-list li .src-tag{margin-top:3px}
 
 /* 优先级四档。中/低两档原型没有（它的样例只有高和紧急），按同一套语言补的。 */
+
+/* p-high 的字色换成宿主**专门给警示文字**的那个令牌。原型这里用的是 --state-warn，
+   那是**底色**令牌（浅色主题下是 amber-500），压在 12% 同色底上只有 2.1:1 ——
+   浅色主题里那几个字几乎糊在底色上。--warn-fg 指向 state-warn-label，
+   才是宿主为「琥珀色文字」准备的那一个。 */
+.dsptb .prio.p-high{color:var(--warn-fg)}
 .dsptb .prio.p-medium{color:var(--business-primary);background:hsl(221 98% 67% / .14)}
 .dsptb .prio.p-low{color:var(--label-tertiary);background:var(--bg-layer-3)}
 .dsptb .prio-row{display:inline-flex;gap:6px}
