@@ -384,7 +384,7 @@ body[data-ds-dark-theme] .dsptb .seg button[aria-pressed="true"]{background:var(
   50%{border-color:var(--state-warn)}
 }
 .dsptb .card.tone-cascade{
-  animation:dsptb-cascade 2.4s ease-in-out infinite;
+  animation:dsptb-cascade 1.6s ease-in-out infinite;
   border-color:var(--state-error);
 }
 .dsptb .card.tone-cascade:hover{animation-play-state:paused}
@@ -418,6 +418,18 @@ body[data-ds-dark-theme] .dsptb .seg button[aria-pressed="true"]{background:var(
    上面那层把中间盖住，露出来的正好就是边框那一条。
    真边框设成透明，不然它会盖在渐变上面。
 
+   ## 光是「跑」还是「闪」，全看两点：带宽和速度
+
+   用户 2026-10-14 的原话：「呼吸太慢了不仔细看都看不出来闪烁效果」，
+   紧接着是「我记得我已经让你改成跑马灯的效果，怎么又变成呼吸的效果了」。
+   东西是跑马灯没错（角度一直在走，套件里有断言），但**眼睛不一定这么看**：
+
+   光带原本占整圈的三分之一（240deg 之后一路淡下去），走得又慢（3 秒一圈）。
+   于是在边框上任意一个点看，看到的是「慢慢变亮、再慢慢变暗」—— 那是呼吸，
+   不是跑马灯。跑马灯要的是**一小段亮光快速掠过**：跟着它挪的眼睛才看得见它是跑的。
+
+   所以：光带收到 60deg 上下（两头留一点肩，别硬切），一圈 1.5 秒。
+
    （这段注释里一个反引号都没有是**故意的**：整个文件是一个 String.raw 模板，
    注释里写反引号会把字面量提前收尾。已经踩过四次了，build.mjs 里有专门的检查。）
 
@@ -441,13 +453,14 @@ body[data-ds-dark-theme] .dsptb .seg button[aria-pressed="true"]{background:var(
   background-image:
     linear-gradient(var(--bg-base),var(--bg-base)),
     conic-gradient(from var(--dsptb-turn),
-      var(--tone) 0deg 240deg,
-      color-mix(in srgb,var(--tone-glow) 55%,var(--tone)) 300deg,
-      var(--tone-glow) 340deg,
+      var(--tone) 0deg 250deg,
+      color-mix(in srgb,var(--tone-glow) 45%,var(--tone)) 285deg,
+      var(--tone-glow) 320deg,
+      color-mix(in srgb,var(--tone-glow) 45%,var(--tone)) 350deg,
       var(--tone) 360deg);
   background-origin:padding-box,border-box;
   background-clip:padding-box,border-box;
-  animation:dsptb-marquee 3s linear infinite;
+  animation:dsptb-marquee 1.5s linear infinite;
 }
 /* 悬停时别让那条 hover 规则把真边框又画回来（它会盖住渐变）。
    跑马灯**不**跟着停 —— 停下来的光会变成边框上一块不动的色斑，看着像坏了。 */
