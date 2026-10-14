@@ -31,9 +31,9 @@ export const TONE_LABEL: Record<Tone, string> = {
   red: '这一轮没走完',
   orange: '停住了，等你',
   green: '目标达成',
-  blue: '跑完了，等你发话',
+  blue: '跑完了，轮到你了',
   cascade: '它下面还压着东西',
-  idle: '没什么特别的事，就等你收工',
+  idle: '没什么动静',
 }
 
 /**
@@ -123,8 +123,14 @@ export function toneOf(input: ToneInput): Tone | undefined {
     if (turn.kind === 'completed') {
       if (input.goalPhase === 'complete') return 'green'
       if (input.unread === true) return 'blue'
-      // 跑完了、你也看过了 —— 没有具体理由可给，交给下面那条通用兜底
-      return input.waiting === true ? 'idle' : undefined
+      /*
+       * 跑完一轮就是跑完一轮 —— **「你看过没有」是气泡里的一句话，不是另一种颜色**。
+       *
+       * 以前这里没看过的给蓝、看过的落到中性的闲置色，于是「完成了任务」的窗口
+       * 顶着「没什么特别的事，就等你收工」——用户 2026-10-14 的原话是
+       * 「有些会话窗口是完成任务了的，但是在你的定义里是闲着」。跑完了不是闲着。
+       */
+      return input.waiting === true ? 'blue' : undefined
     }
     /*
      * `unknown` 是**我们读不出来**，不是它出了事。
@@ -133,7 +139,7 @@ export function toneOf(input: ToneInput): Tone | undefined {
      * （这跟看板那侧的原则不冲突：那边说的是「读不出来**不能当成成功**」，
      * 因为它们要拿这个判断要不要写一条结算记录，写错了会留下假账。我们什么都没改。）
      *
-     * 但它照样落到下面那条通用兜底上（在「待审阅」里就是那个中性的闲着色）——
+     * 它落到下面的兜底上：有执行记录的就按执行记录判；都没有的才是那个中性的闲着色 ——
      * 那是「我这儿没有别的消息」，不是「我查过了没问题」，两码事。
      * 区别写在气泡里：这一种会明说「上一轮是怎么结束的没读出来」。
      */
@@ -146,12 +152,24 @@ export function toneOf(input: ToneInput): Tone | undefined {
   }
 
   /*
+   * 任务卡的「跑完了」：账本里它已经收口（`done`）、上次执行是成功的。
+   *
+   * **跟会话那条合并成同一种颜色**：两边说的都是同一件事 —— 活干完了，球在你这边。
+   * （不合并的话这一种就会掉进下面的兜底，被说成「没什么动静」：真机上唯一的
+   * 任务卡 `weekly-planner · 每日核验 + 周期` 就是 `done` + `succeeded`，
+   * 一字不差地踩中。）
+   *
+   * 放在 `turn` 那段**后面**：一张卡既挂着执行记录、又挂着跑它的那个会话时，
+   * 会话那边的结论更近（执行记录可能是更早那一轮的）。
+   */
+  if (outcome === 'succeeded') return input.waiting === true ? 'blue' : undefined
+
+  /*
    * 通用兜底：停在「待审阅」里、上面一条都没沾上。
    *
-   * 这是这一列**绝大多数卡**的实际处境：没出错、没在等你、目标也没宣布完成，
-   * 就是安安静静停在那儿等你收工。以前这里返回 `undefined`，于是整列只有少数
-   * 几张有颜色、其余全是灰扑扑的默认边框 —— 用户的原话是
-   * 「待审阅中的每个卡片都应该有自己的边框颜色」。
+   * 到这一步剩下的都是**真的没有消息**：这个窗口没跑完过一整轮，或者压根没有执行记录。
+   * 以前这里返回 `undefined`，于是整列只有少数几张有颜色、其余全是灰扑扑的默认边框 ——
+   * 用户的原话是「待审阅中的每个卡片都应该有自己的边框颜色」。
    */
   return input.waiting === true ? 'idle' : undefined
 }
@@ -177,22 +195,30 @@ export function toneReason(input: ToneInput): string | undefined {
   if (outcome === 'failed') return input.execution?.error ?? '上次执行失败结算'
   if (outcome === 'cancelled') return '上次执行被取消了'
 
+
   const turn = input.turn
   /*
    * 下面这几处的 `waiting` 分支跟 `toneOf` 末尾那条通用兜底是一对：
    * 颜色是那个中性的闲着色，话得说清楚「为什么它没有任何动静」。
    * 光给个颜色不给理由，等于让人猜。
    */
-  if (turn === undefined) {
-    if (input.waiting !== true) return undefined
+  if (turn === undefined || turn.kind === 'unknown') {
+    /*
+     * 会话那边没有结论，就看卡自己的执行记录 —— **跟 `toneOf` 同一个次序**
+     * （会话的结论更近，执行记录可能是更早那一轮的）。
+     */
+    if (outcome === 'succeeded') {
+      return input.waiting === true
+        ? '上一次执行跑成功了，等你收工或者叫它接着干'
+        : '上一次执行跑成功了'
+    }
+    if (input.waiting !== true) {
+      return turn === undefined ? undefined : '这一轮是怎么结束的没读出来'
+    }
+    if (turn !== undefined) return '上一轮是怎么结束的没读出来；只看得见它停在这儿'
     // 「读不到」和「确实没有」不能说成同一句话
     if (input.blind === true) return '读不到上一轮的结论（原因见页面顶上的提示），这一格说不好'
     return '它停在这儿等你收工（还没有跑完过一整轮的记录）'
-  }
-  if (turn.kind === 'unknown') {
-    return input.waiting === true
-      ? '上一轮是怎么结束的没读出来；只看得见它停在这儿'
-      : '这一轮是怎么结束的没读出来'
   }
   if (turn.kind === 'completed') {
     if (input.goalPhase === 'complete') return 'AI 宣布目标达成'
@@ -201,7 +227,7 @@ export function toneReason(input: ToneInput): string | undefined {
     // 目标还在，但它停了 —— 这句话比「没什么要处理的」有用得多
     if (input.goalPhase === 'active') return '它还有个没做完的目标，停在这儿等你'
     if (input.goalPhase === 'paused') return '目标被暂停了，停在这儿等你'
-    return '跑完一轮了，没什么要处理的 —— 等你收工或者叫它接着干'
+    return '跑完一轮了，等你收工或者叫它接着干'
   }
   if (turn.kind === 'blocked') return '被挡下来了，没走到下一步'
   if (turn.kind === 'max-tokens') return '上下文用尽了，这一轮没走完'
