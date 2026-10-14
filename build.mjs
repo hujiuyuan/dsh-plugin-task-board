@@ -30,6 +30,39 @@ if (manifest.version !== pkg.version) {
 
 const PLUGIN_ID = pkg.name
 
+/*
+ * styles.ts 的 CSS 正文里**一个反引号都不许有**。
+ *
+ * 整个文件是一个 String.raw 模板，注释里顺手写一个反引号（比如把类名括起来）
+ * 就把字面量提前收尾了 —— 后面的 CSS 全被当成 JS 表达式，报出来的是一堆
+ * 「Property 'col' does not exist on type 'string'」这种看不出源头是什么的错。
+ * 到这一步为止已经踩过四次，所以单独查一次，报错直接说人话。
+ */
+{
+  const path = join(here, 'src/client/styles.ts')
+  const source = readFileSync(path, 'utf8')
+  const open = source.indexOf('String.raw`')
+  if (open < 0) {
+    console.error('[dsh-plugin-task-board build] src/client/styles.ts 里找不到 String.raw 模板的开头')
+    process.exit(1)
+  }
+  const body = source.slice(open + 'String.raw`'.length)
+  const first = body.indexOf('`')
+  const last = body.lastIndexOf('`')
+  if (first < 0) {
+    console.error('[dsh-plugin-task-board build] src/client/styles.ts 的 CSS 模板没有收尾反引号')
+    process.exit(1)
+  }
+  if (first !== last) {
+    const line = source.slice(0, open + 'String.raw`'.length + first).split('\n').length
+    console.error(
+      `[dsh-plugin-task-board build] src/client/styles.ts 的 CSS 里混进了反引号（第 ${line} 行往后的第一个）。\n` +
+        '整个文件是一个 String.raw 模板，注释里出现反引号会把字面量提前收尾 —— 把它去掉再打包。',
+    )
+    process.exit(1)
+  }
+}
+
 // 先过类型检查，**再**打包。
 //
 // esbuild 只转译不做类型检查，于是有些错它会照单全收、打出一个语法上完全合法的

@@ -391,37 +391,66 @@ body[data-ds-dark-theme] .dsptb .seg button[aria-pressed="true"]{background:var(
   .dsptb .card.tone-cascade{animation:none;border-color:var(--state-error)}
 }
 
-/* ── 呼吸灯 ────────────────────────────────────────────────────────────────
-   **每一种纯色的边都呼吸**（红 / 橙 / 绿 / 蓝），在本色和「浅处」之间来回。
-   唯一不在这儿的是橙红那条（子代理压着）—— 它本来就在红橙之间来回，
-   意义不同，见上面那段。
+/* ── 边框上的跑马灯 ────────────────────────────────────────────────────────
+   **每一种纯色的卡都有一道光沿着边框跑**（红 / 橙 / 绿 / 蓝）。
+   底色仍然是那个色 —— 所以颜色本身还好认；跑的是压在底色上的一段更亮的、
+   带渐隐尾巴的光。
 
-   用户的原话是「所有纯色的都要和白色做渐变色的呼吸变化」。
+   先说为什么不是「整条边一起亮暗」：那是上一版的做法，用户看过之后说
+   「和我想要的效果不太一样，我想的是类似跑马灯的那种」。
 
-   但「浅处」是哪一边，**分主题，不能写死**：
-     深色主题：往白走，这就是「呼吸灯」本来的样子。
-     浅色主题：**反着往深走**。卡片底色（--bg-base）在浅色下本来就是白的，
-               往白渐变等于让边框一路融进白底、周期性地消失，看着像渲染坏了。
-               所以浅色下同一个呼吸走的是「更浓更实」，一样是脉动，但始终看得见。
-   两边都留了色相，所以红的还是红、蓝的还是蓝，不会因为呼吸就认不出来。
+   ## 怎么让一个角度动起来
 
-   选择器用 :not(.tone-cascade) 而不是把四个类名列一遍：以后再添一种纯色，
-   它自动就呼吸 —— 这正是用户要的「所有纯色的」。 */
-@keyframes dsptb-breathe{
-  0%,100%{border-color:var(--tone)}
-  50%{border-color:var(--tone-glow)}
-}
+   conic-gradient(from Xdeg, …) 里那个角度**没法直接动画** —— 得先用
+   @property 把它注册成一个真正的 angle 类型，浏览器才知道怎么在两个角度
+   之间插值。不注册的话它就是个字符串，动画会退化成硬切。
+   属性名带 dsptb 前缀，免得跟宿主或别的插件撞。
+
+   ## 为什么把边框画成背景，而不用 ::after
+
+   本来最直观的是拿 ::after 盖在边框上。但 .card 上有 overflow:hidden
+   （用来裁工作区那条斜带），而 overflow:hidden 是按 **padding box** 裁的 ——
+   ::after 只要伸到边框那一圈就会被整个裁掉，看不见。
+   所以改成背景两层：内芯裁到 padding-box、边框那一圈裁到 border-box，
+   上面那层把中间盖住，露出来的正好就是边框那一条。
+   真边框设成透明，不然它会盖在渐变上面。
+
+   （这段注释里一个反引号都没有是**故意的**：整个文件是一个 String.raw 模板，
+   注释里写反引号会把字面量提前收尾。已经踩过四次了，build.mjs 里有专门的检查。）
+
+   ## 光往哪边「亮」是分主题的
+
+   深色主题：往白走，这是「跑马灯」本来的样子。
+   浅色主题：**反着往深走**。卡片底色在浅色下本来就是白的，往白渐变等于让
+             那道光融进白底、跑起来什么也看不见。 */
+@property --dsptb-turn{syntax:'<angle>';initial-value:0deg;inherits:false}
+@keyframes dsptb-marquee{to{--dsptb-turn:360deg}}
 .dsptb .card.tone:not(.tone-cascade){
   --tone-glow:color-mix(in srgb,var(--tone) 62%,#000);
-  animation:dsptb-breathe 2.4s ease-in-out infinite;
+  border-color:transparent;
+  background-image:
+    linear-gradient(var(--bg-base),var(--bg-base)),
+    conic-gradient(from var(--dsptb-turn),
+      var(--tone) 0deg 240deg,
+      color-mix(in srgb,var(--tone-glow) 55%,var(--tone)) 300deg,
+      var(--tone-glow) 340deg,
+      var(--tone) 360deg);
+  background-origin:padding-box,border-box;
+  background-clip:padding-box,border-box;
+  animation:dsptb-marquee 3s linear infinite;
 }
 body[data-ds-dark-theme] .dsptb .card.tone:not(.tone-cascade){
   --tone-glow:color-mix(in srgb,var(--tone) 34%,#fff);
 }
-/* 鼠标压上去就停 —— 要读卡片的时候，眼前不该一直有个东西在动 */
-.dsptb .card.tone:not(.tone-cascade):hover{animation-play-state:paused}
+/* 悬停时别让那条 hover 规则把真边框又画回来（它会盖住渐变）。
+   跑马灯**不**跟着停 —— 停下来的光会变成边框上一块不动的色斑，看着像坏了。 */
+.dsptb .card.tone:not(.tone-cascade):hover{border-color:transparent}
 @media (prefers-reduced-motion:reduce){
-  .dsptb .card.tone:not(.tone-cascade){animation:none;border-color:var(--tone)}
+  .dsptb .card.tone:not(.tone-cascade){
+    animation:none;
+    border-color:var(--tone);
+    background-image:none;
+  }
 }
 .dsptb .card h4{
   display:flex;align-items:baseline;gap:5px;
