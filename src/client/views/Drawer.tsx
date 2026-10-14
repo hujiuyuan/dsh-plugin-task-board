@@ -162,8 +162,16 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
         <div className="drawer-head">
           <h2 title={headTip}>
             {task.title}
+            {/*
+              这里原来对任务卡摆的是**整个任务 id**（` · fe0dea06-e930-…`），
+              会话卡摆的是「 · 会话」。两行东西长得完全不一样，用户看到之后问
+              「为什么这个任务的抽屉和其他任务不一样」—— 那串 uuid 就是原因。
+
+              现在两边都只说自己是哪一类；id 挪到标题的悬停气泡里
+              （跟会话那边一个待遇：想核对的人一悬停就有，不核对的人一次都不用看）。
+            */}
             <span className="mono" style={{ color: 'var(--label-tertiary)', fontWeight: 400 }}>
-              {isSession ? ' · 会话' : ` · ${task.id}`}
+              {isSession ? ' · 会话' : ' · 任务'}
             </span>
           </h2>
           <span className="st" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--label-secondary)' }}>

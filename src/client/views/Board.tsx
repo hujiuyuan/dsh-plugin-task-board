@@ -112,12 +112,22 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
         out.archived.sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0))
         continue
       }
-      // 结束了的按「结算时间」倒序 —— 跟卡片第四行写出来、跟分组用的都是同一个时刻，
-      // 三者不一致的话列表顺序看起来就是随机的。
-      // 没结束的两列：**先按优先级，再按创建时间倒序**（原型是「有目标的在前」，
-      // 这里换成一条真能从账本算出来的：快炸的、正在跑的、会自己动的排前面）。
+      /*
+       * 待审阅：**最早停下来的排最前面**。
+       *
+       * 这一列问的是「哪个窗口我还没收工」，而最容易被忘掉的恰恰是最早停下来
+       * 那个 —— 倒序（最近的在上面）等于把最该看的压到最底下。
+       *
+       * 用的时刻就是卡片第四行写出来的那个：会话写「活动」、任务卡写「结算」，
+       * 两者都走 `spanEnd`。会话没有执行记录，`spanEnd` 会落到它的 `createdAt`，
+       * 而会话在投影时就把 `createdAt` 填成了 `updatedAt`（会话没有「创建时刻」，
+       * 只有最后活动）—— 所以两边落在同一个数上，卡上写的和排的顺序是一致的。
+       *
+       * 另外两列：**先按优先级，再按创建时间倒序**（原型是「有目标的在前」，
+       * 这里换成一条真能从账本算出来的：快炸的、正在跑的、会自己动的排前面）。
+       */
       out[column].sort(column === 'review'
-        ? (a, b) => spanEnd(b, now) - spanEnd(a, now)
+        ? (a, b) => spanEnd(a, now) - spanEnd(b, now)
         : (a, b) => ruleRank(b) - ruleRank(a) || b.createdAt - a.createdAt)
       /*
        * 会话行沉到本列最后 —— **但「待审阅」列不沉**。
@@ -279,11 +289,21 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
         const items = filtered[column]
         const filter = filters[column]
         const filteredNow = filter.ws !== '' || filter.q.trim().length > 0 || filter.trig !== 'all'
-        // **筛过之后照样按天分组**。筛完就退回一长条平铺列表的话，
-        // 用户每打一个字列表结构就变一次，找东西反而更难。
-        // 「待审阅」和「归档」都是只增不减的两列，都得按天折；
-        // 「进行中」和「待办」是有多少看多少，折起来只是多一次点击。
-        const dated = column === 'review' || column === 'archived'
+        /*
+         * **只有「归档」按天分组。**
+         *
+         * 「待审阅」原本也分，用户看过之后说不要：「待审阅这栏不需要根据时间
+         * 分节，排序条件应该是根据更新时间正序（最早的放最前面）」。
+         * 分组和「最早的在最上面」本来就是打架的 —— 按天分完，组内再怎么排，
+         * 跨过组边界就断了。这一列要的是一条从头到尾的队列。
+         *
+         * 归档保留分组：那一列是只增不减的历史，按天折 + 只放 7 个工作日
+         * 才收得住。「进行中」和「待办」是有多少看多少，折起来只是多一次点击。
+         *
+         * 注意：**筛过之后照样按天分组**（筛完退回一长条平铺列表的话，
+         * 用户每打一个字列表结构就变一次，找东西反而更难）。
+         */
+        const dated = column === 'archived'
         const days = dated ? groupByDay(items, now) : undefined
         const shown = days === undefined ? undefined : paginateByWorkday(days, pages[column] * WORKDAYS_PER_PAGE)
         const rest = days === undefined ? [] : days.slice(shown!.length)
@@ -667,16 +687,10 @@ function Card({ task, column, index, now, workspaces, selectedId, onSelect, canM
           {executionSummary(task) ?? ''}
         </span>
         <span className="cseg chip-slot">
-          {/* 会话行把**它自己**那个会话 id 摆在这儿 —— 卡上第二行本来就是放会话 chip 的
-              位置，空着的话这一行整条是白的，看起来像没读到的数据 */}
-          {(session ? task.fromSession : last?.sessionId) !== undefined ? (
-            <span
-              className="chip"
-              title={session ? `这个会话：${task.fromSession}` : `最近一次执行会话 ${last!.sessionId}`}
-            >
-              {shortSession((session ? task.fromSession : last!.sessionId)!)}
-            </span>
-          ) : null}
+          {/* 这里原来摆一个会话 id 的缩写 chip。用户 2026-10-14 说不要：
+              「不需要展示 sessionId 在卡片上」—— 一串十六进制对人没有任何用，
+              想认哪个会话看标题就够了。要看 id 去悬停气泡或者抽屉里（那两处的
+              是**给人复制用的**，不是摆在脸上当装饰的）。 */}
         </span>
       </div>
 
@@ -698,10 +712,6 @@ function executionSummary(task: TaskRecord): string | undefined {
 }
 
 /** 会话 id 是一串哈希，掐头去尾就认不出来了 —— 只从尾巴截。 */
-function shortSession(sessionId: string): string {
-  return sessionId.length <= 14 ? sessionId : `${sessionId.slice(0, 13)}…`
-}
-
 /**
  * 第四行右边：排期。启用了写下次触发时间，没启用只留一个空心钟。
  *
