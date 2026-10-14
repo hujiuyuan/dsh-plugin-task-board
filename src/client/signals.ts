@@ -41,6 +41,8 @@ export interface Signals {
   unread: ReadonlySet<string>
   /** 会话 id → 上一轮是怎么结束的。 */
   facts: ReadonlyMap<string, TurnFact>
+  /** 会话 id → 目标处在哪个阶段（`complete` 才上绿色）。没有目标的会话不在表里。 */
+  goalPhases: ReadonlyMap<string, string>
   /** 会话 id → 它下面挂着几个卡住的子代理（含更深层）。 */
   stuck: ReadonlyMap<string, number>
   /** 会话 id → 你什么时候把它归档的。 */
@@ -63,6 +65,7 @@ const EMPTY: Signals = {
   pending: new Map(),
   unread: new Set(),
   facts: new Map(),
+  goalPhases: new Map(),
   stuck: new Map(),
   archives: new Map(),
   factsWhy: null,
@@ -87,6 +90,13 @@ export function useSignals(ctx: any, inputs: SignalInputs): Signals {
 
   const [status, setStatus] = useState<ReadonlyMap<string, SessionStatus>>(() => new Map())
   const [facts, setFacts] = useState<ReadonlyMap<string, TurnFact>>(() => new Map())
+  /*
+   * 会话 id → 目标的阶段（`active` / `paused` / `blocked` / `complete`）。
+   * 跟 `facts` 挤在同一条路由里只是因为**走同一条路、共用同一份缓存**：
+   * 一个是「这一轮怎么结束的」，一个是「它想干的那件事现在什么状态」。
+   * 在宿主那边是同一趟扫会话日志扫出来的，没多花一次读盘（见 src/sessionfacts.ts）。
+   */
+  const [goalPhases, setGoalPhases] = useState<ReadonlyMap<string, string>>(() => new Map())
   const [factsWhy, setFactsWhy] = useState<string | null>(null)
   const [statusWhy, setStatusWhy] = useState<string | null>(null)
   const [archives, setArchives] = useState<ReadonlyMap<string, number>>(() => new Map())
@@ -160,6 +170,17 @@ export function useSignals(ctx: any, inputs: SignalInputs): Signals {
         for (const id of stale) askedAt.current.set(id, updatedAt.get(id) ?? 0)
         const raw = (body as { facts?: unknown }).facts
         if (raw === null || typeof raw !== 'object') return
+        setGoalPhases(current => {
+          const next = new Map(current)
+          for (const [id, fact] of Object.entries(raw as Record<string, any>)) {
+            const phase = fact?.goalPhase
+            // 认不出的当「没有目标」：删掉旧值，别把上一轮读到的留着 ——
+            // 目标被 clear 掉之后卡片还挂个绿色，比不上色糟得多
+            if (typeof phase === 'string' && phase.length > 0) next.set(id, phase)
+            else next.delete(id)
+          }
+          return next
+        })
         setFacts(current => {
           const next = new Map(current)
           for (const [id, fact] of Object.entries(raw as Record<string, any>)) {
@@ -221,8 +242,8 @@ export function useSignals(ctx: any, inputs: SignalInputs): Signals {
   }
 
   return useMemo(
-    () => ({ pending, unread, facts, stuck, archives, factsWhy, statusWhy, setArchived }),
-    [pending, unread, facts, stuck, archives, factsWhy, statusWhy],
+    () => ({ pending, unread, facts, goalPhases, stuck, archives, factsWhy, statusWhy, setArchived }),
+    [pending, unread, facts, goalPhases, stuck, archives, factsWhy, statusWhy],
   )
 }
 

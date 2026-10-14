@@ -294,7 +294,7 @@ land here, so the two surfaces can never disagree about a card* —— 两条路
 |---|---|---|---|
 | **红** | 这一轮没走完，你得看一眼 | `turn/end.reason.kind` ∈ `error` / `max-tokens` / `aborted` / `interrupted` | 会话事件日志 |
 | **橙** | 它**停住了**，等你做一个动作 | `pendingInteraction.kind` ∈ `approval` / `question` / `plan-review`；`goal.phase === 'blocked'` | 宿主实时推送 |
-| **绿** | 它自己宣布目标达成 | `goal.phase === 'complete'` | 投影 |
+| **绿** | 它自己宣布目标达成 | 最后一条 `goal/change` 的 `goal.phase === 'complete'` | 会话事件日志 |
 | **蓝** | 跑完一轮，轮到你了 | `reason.kind === 'completed'` **且** `completionUnread` | 两条路各出一半 |
 | **橙红呼吸** | **它下面还压着东西** | 它的子代理里有在等的 / 跑挂了的 | 会话目录的父子关系 |
 
@@ -323,6 +323,15 @@ CSS 里是一条 `:not(.tone-cascade)` 规则覆盖全部纯色，以后再加�
 **读不出来 ≠ 出了事。** 两者在下游长得一样（都没颜色），但意思完全不同：
 一个是「它还没跑完过一整轮」，一个是「我读不出来，你别信我」。所以这两种分开报，
 页面顶上有一条横幅专门说后一种。
+
+**绿色读的是事件，不是投影。** 宿主有一个 `goal` 投影，上面也有 `phase`，本来走它更顺。
+不走的原因有两条：那个投影**按需懒加载**，给板上二十个会话各要一次是要发请求的；
+而宿主半体为了拿 `turn/end` 本来就要读会话事件日志，目标的最后一条变化就躺在同一份日志里
+（`goal/change`）—— **不新增任何一次读盘**。
+
+两个坑：目标的最后一条变化经常排在最后一次 `turn/end` **之前**（先宣布达成，那一轮才结束），
+扫到 `turn/end` 就停下会把它整个漏掉；`operation: 'clear'` 那条里**没有 `goal`**，
+只能看到 `cleared`，这时要报「没有目标」而不是把上一轮那个 `active` 留着。
 
 **为什么这件事要单独做一条宿主路由。** `turn/end.reason` **不在任何一个投影里**
 （投影只有 `turnOutline` / `turnBoundary` / `subagentCatalog`），浏览器半体根本拿不到。
@@ -426,7 +435,7 @@ npm run verify    # 提交前自检，见下
 第 3 步会真的往磁盘写文件（归纳缓存、人工改动），所以那一段开始前把 `DSH_HOME`
 换成一个临时目录——自检不该在你的 `~/.dsh` 里留东西。
 
-界面那一半另外有一套浏览器套件（headless Chrome 真渲染 + 真点击，536 条断言），
+界面那一半另外有一套浏览器套件（headless Chrome 真渲染 + 真点击，538 条断言），
 在 `/tmp/dsptb-client/`，不进仓库。
 
 `npm run build` 打包前会先跑一遍 `tsc`。esbuild 只转译不做类型检查，有些错它能

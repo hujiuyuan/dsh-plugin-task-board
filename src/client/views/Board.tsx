@@ -174,6 +174,7 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
   const signalsOf = (task: TaskRecord): {
     turn?: import('../tone').TurnFact
     pendingKind?: string
+    goalPhase?: string
     stuckChildren?: number
     unread?: boolean
   } => {
@@ -183,6 +184,9 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
       ...(signals.facts.get(sessionId) === undefined ? {} : { turn: signals.facts.get(sessionId) }),
       ...(signals.pending.get(sessionId) === undefined ? {} : { pendingKind: signals.pending.get(sessionId) }),
       ...(signals.stuck.get(sessionId) === undefined ? {} : { stuckChildren: signals.stuck.get(sessionId) }),
+      // 「它自己宣布目标达成了」—— 只有这一条能让卡变绿。
+      // 从会话事件日志里读的（最后一条 `goal/change`），不是投影，见 sessionfacts.ts
+      ...(signals.goalPhases.get(sessionId) === undefined ? {} : { goalPhase: signals.goalPhases.get(sessionId) }),
       unread: signals.unread.has(sessionId),
     }
   }

@@ -66,6 +66,18 @@ export interface TurnFact {
 export interface SessionFact {
   /** 最后一次读到的 `turn/end`。**会话正在跑时它属于上一轮**，别当成当前状态用。 */
   turn?: TurnFact
+  /**
+   * 目标现在处在哪个阶段：`active` / `paused` / `blocked` / `complete`。
+   *
+   * 来源是最后一条 `goal/change` 事件（不是投影 —— 见下面 `goalPhaseOf`）。
+   * **没有目标就没有这个字段**，两个意思都对：会话压根没用过 `/goal`，
+   * 或者目标已经被 `clear` 掉了。界面上这两种都是「不上色」。
+   *
+   * 它跟 `turn` 挤在一条记录里只是因为**走同一条路、共用同一份缓存** ——
+   * 一个是「这一轮怎么结束的」，一个是「它想干的那件事现在什么状态」，
+   * 语义上没有关系。
+   */
+  goalPhase?: string
   /** 是「读的过程失败了」，不是「没有这一轮」。这条为真时 `turn` 不可信。 */
   unreadable?: boolean
   /** 读不出来时的一句话原因，给界面显示。 */
@@ -145,6 +157,12 @@ async function readOne(
   if (hit !== undefined && hit.cursor === cursor) return hit.fact
 
   let beforeSeq: number | undefined
+  /*
+   * 这两个**声明在循环外面**：翻到底也没找到 `turn/end` 时（循环末尾那次 return）
+   * 还要用它们判断「目标那件事读到了没有」。声明在循环里的话那一处就取不到了。
+   */
+  let goalPhase: string | undefined
+  let sawGoalChange = false
   for (let page = 0; page < MAX_PAGES; page += 1) {
     let result: any
     try {
@@ -166,11 +184,35 @@ async function readOne(
     }
 
     const records = Array.isArray(result?.records) ? result.records : []
-    // 从后往前找 —— 要的是**最后**一次，不是第一次
+    /*
+     * 从后往前扫 —— **要的是最后一条，不是第一条**。
+     *
+     * 一趟里捞两样：`turn/end`（这一轮怎么结束的）和 `goal/change`
+     * （目标现在什么阶段）。从后往前的好处是**第一个碰上的就是最后一条**。
+     *
+     * 目标**只在第一页里找**：没有目标的会话是绝大多数，为了找它多翻两页
+     * 等于给每个会话白加两次读盘。目标变了几乎总是发生在会话尾巴上
+     * （开工时建、收工时 complete/clear），一页 200 条足够覆盖。
+     * 真碰上超长会话把目标事件挤出去了，结果只是**不上色**，不会报错。
+     */
+    let turn: TurnFact | undefined
     for (let index = records.length - 1; index >= 0; index -= 1) {
       const event = records[index]?.event
-      if (event?.type !== 'turn/end') continue
-      const fact: SessionFact = { turn: turnFactOf(event) }
+      if (turn === undefined && event?.type === 'turn/end') turn = turnFactOf(event)
+      if (page === 0 && !sawGoalChange && event?.type === 'goal/change') {
+        sawGoalChange = true
+        goalPhase = goalPhaseOf(event)
+      }
+      /*
+       * 第一页**整页扫完再走**：目标的最后一条变化经常排在最后一次 `turn/end`
+       * **之前**（先宣布目标达成，那一轮才结束）—— 扫到 turn/end 就停会把它漏掉。
+       * 后面的页只找 turn/end，两样都到手也就走。
+       */
+      if (turn !== undefined && page > 0) break
+      if (turn !== undefined && sawGoalChange) break
+    }
+    if (turn !== undefined) {
+      const fact: SessionFact = { turn, ...(goalPhase === undefined ? {} : { goalPhase }) }
       cache.set(sessionId, { cursor, fact })
       return fact
     }
@@ -181,8 +223,19 @@ async function readOne(
     beforeSeq = oldest
   }
 
-  // 翻到底也没有 `turn/end`：这个会话确实还没跑完过一整轮。
-  // **这不缓存** —— 它下一轮跑完就该有结论了，而 cursor 在那之前不会变。
+  /*
+   * 翻到底也没有 `turn/end`：这个会话确实还没跑完过一整轮。
+   *
+   * 但**目标那件事读到了就是读到了**，别跟着一起扔掉 —— 一个会话可能
+   * `/goal` 建好目标、到现在一轮都没跑完，那它也确实是「目标进行中」。
+   *
+   * 读不到目标时**不缓存**：它下一轮跑完就该有结论了，而 cursor 在那之前不会变。
+   */
+  if (sawGoalChange) {
+    const fact: SessionFact = goalPhase === undefined ? {} : { goalPhase }
+    cache.set(sessionId, { cursor, fact })
+    return fact
+  }
   return {}
 }
 
@@ -268,6 +321,28 @@ export function turnFactOf(event: any): TurnFact {
     ...(typeof failure.code === 'string' && failure.code.length > 0 ? { code: failure.code } : {}),
     ...(typeof failure.message === 'string' && failure.message.length > 0 ? { message: failure.message } : {}),
   }
+}
+
+/**
+ * `goal/change` → 目标现在处在哪个阶段。
+ *
+ * ## 为什么读事件而不是读投影
+ *
+ * 宿主有一个 `goal` 投影（`projections.faceOf('goal')`），上面也有 `phase`。
+ * 不走它的原因有两个：一是那个投影**按需懒加载**，给板上二十个会话各要一次
+ * 是要发请求的；二是这条路已经在跑了 —— 宿主半体为了拿 `turn/end` 本来就要
+ * 读会话事件日志，目标变化就躺在同一份日志里。**不新增任何一次读盘**。
+ *
+ * ## 事件里带的是「变化之后」的整个目标
+ *
+ * 每一条 `goal/change` 的 `data.goal` 都是**改完之后**的样子，所以最后一条就够，
+ * 不需要把历史重放一遍。`operation` 有 `create` / `complete` / `clear` …
+ * （真机日志里见过的），但我们不路由 `operation` —— 只看有没有 `goal.phase`，
+ * 认不出的一律当「没有目标」处理：不上色，不编结论。
+ */
+export function goalPhaseOf(event: any): string | undefined {
+  const phase = event?.data?.goal?.phase
+  return typeof phase === 'string' && phase.length > 0 ? phase : undefined
 }
 
 function nestedKind(value: unknown): string | undefined {

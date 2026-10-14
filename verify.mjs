@@ -114,6 +114,7 @@ const bad = (name, detail) => {
    *   s-two  两轮都结束了 → 要取**后**那条（取错就永远显示上一轮的原因）
    *   s-none 一轮都没跑完   → 没有 turn/end，**不是读失败**
    *   s-boom page 抛错      → 读失败，要跟「没跑过」分开报
+   *   s-goal 建过目标并宣布达成 → `goalPhase: 'complete'`，绿色那条唯一的来源
    */
   const gatewayCalls = []
   const factFixtures = {
@@ -124,6 +125,22 @@ const bad = (name, detail) => {
     ],
     's-none': [{ event: { type: 'turn/start', seq: 5, time: 500, data: { turn: 1 } } }],
     's-ok': [{ event: { type: 'turn/end', seq: 9, time: 900, data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'hook', reason: 'deepseek-account/signed-out' } } } } }],
+    /*
+     * 目标的**最后一条变化排在最后一次 turn/end 之前** —— 真机日志里就是这个顺序：
+     * 先宣布目标达成，那一轮才结束。扫到 turn/end 就停会把它整个漏掉，
+     * 所以这一条同时也是「别提前 break」的守卫。
+     */
+    's-goal': [
+      { event: { type: 'goal/change', seq: 30, time: 3000, data: { kind: 'goal/change', operation: 'create', goal: { id: 'g1', revision: 1, phase: 'active' } } } },
+      { event: { type: 'goal/change', seq: 40, time: 4000, data: { kind: 'goal/change', operation: 'complete', goal: { id: 'g1', revision: 2, phase: 'complete' } } } },
+      { event: { type: 'turn/end', seq: 50, time: 5000, data: { turn: 1, reason: { kind: 'completed' } } } },
+    ],
+    // 目标被 clear 掉的会话：最后一条 goal/change 里没有 goal，只能看到 cleared
+    's-cleared': [
+      { event: { type: 'goal/change', seq: 30, time: 3000, data: { kind: 'goal/change', operation: 'create', goal: { id: 'g2', revision: 1, phase: 'active' } } } },
+      { event: { type: 'turn/end', seq: 40, time: 4000, data: { turn: 1, reason: { kind: 'completed' } } } },
+      { event: { type: 'goal/change', seq: 50, time: 5000, data: { kind: 'goal/change', operation: 'clear', cleared: { id: 'g2', revision: 2 } } } },
+    ],
   }
   const fakeGateway = {
     invoke: async ({ namespace, method, args }) => {
@@ -406,7 +423,7 @@ const bad = (name, detail) => {
   // 但读完就压成一句 "agent turn ended with an error" 写进账本 ——
   // 真实账本里那条就是这个字符串，`QUOTA` 和 `SERVER` 全被抹平了。
   {
-    const facts = await call(`${mod.SESSION_FACTS_PATH}?ids=s-two,s-none,s-ok,s-boom`)
+    const facts = await call(`${mod.SESSION_FACTS_PATH}?ids=s-two,s-none,s-ok,s-boom,s-goal,s-cleared`)
     if (facts.status !== 200 || facts.body.ok !== true) bad('host: 会话事实路由回 200+ok', JSON.stringify(facts.body))
     else ok('host: 会话事实路由回 200+ok')
 
@@ -419,6 +436,26 @@ const bad = (name, detail) => {
     // 错误码原样带出来，**一个字符的错误文本都不解析**
     if (two?.message !== 'insufficient balance') bad('host: 错误原文一起带回来（给人看，不用于判断）', JSON.stringify(two))
     else ok('host: 错误原文一起带回来')
+
+    /*
+     * 绿色（目标达成）唯一的来源。**两件事一起验**：
+     * ① 读到了 `goalPhase`；② 它没被「先扫到 turn/end 就停」漏掉 ——
+     * 真机日志里目标的最后一条变化就排在最后一次 turn/end 之前。
+     */
+    const goalFact = facts.body.facts?.['s-goal']
+    if (goalFact?.goalPhase !== 'complete') {
+      bad('host: 目标的最后阶段读出来了（goal/change）', JSON.stringify(goalFact))
+    } else ok('host: 目标的最后阶段读出来了', goalFact.goalPhase)
+    if (goalFact?.turn?.kind !== 'completed') {
+      bad('host: 目标那条会话的 turn 也没被挤掉', JSON.stringify(goalFact))
+    } else ok('host: 同一趟里 turn 和 goal 都拿到了')
+
+    // 目标被 clear：最后一条 goal/change 里**没有 goal**，只能看到 cleared ——
+    // 这时要报「没有目标」，不能把上一轮还活着的 active 留着（会一直绿着）
+    const clearedFact = facts.body.facts?.['s-cleared']
+    if (clearedFact?.goalPhase !== undefined) {
+      bad('host: 目标被 clear 掉之后不再报阶段', JSON.stringify(clearedFact))
+    } else ok('host: 目标被 clear 掉之后不再报阶段')
 
     // `aborted` 带次级原因：登出是它下面的一种，跟「你按了停止」不是一回事
     const okFact = facts.body.facts?.['s-ok']?.turn
