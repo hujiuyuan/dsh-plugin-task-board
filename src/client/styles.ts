@@ -390,6 +390,36 @@ body[data-ds-dark-theme] .dsptb .seg button[aria-pressed="true"]{background:var(
 @media (prefers-reduced-motion:reduce){
   .dsptb .card.tone-cascade{animation:none;border-color:var(--state-error)}
 }
+
+/* ── 呼吸灯 ────────────────────────────────────────────────────────────────
+   绿色（目标达成）和蓝色（跑完你没看）也在动，往自己那个色的**浅处**来回。
+   红、橙不掺和：那两种是「你得马上处理」，一直闪会变成背景噪音，看久了就
+   跟没色一样；而绿蓝是**会过去的状态**，亮一下才容易被注意到。
+   橙红那条（子代理压着）本来就在红橙之间来回，意义不同，也不跟着变。
+
+   往哪边「浅」是分主题的 —— 这个不能写死：
+     深色主题：往白走，这就是「呼吸灯」本来的样子。
+     浅色主题：**反着往深走**。卡片底色（--bg-base）在浅色下本来就是白的，
+               往白渐变等于让边框一路融进白底、周期性地消失，看着像渲染坏了。
+               所以浅色下同一个呼吸走的是「更浓更实」，一样是脉动，但始终看得见。
+   两边都留了色相，所以绿色还是绿色、蓝色还是蓝色，不会因为呼吸就认不出来。 */
+@keyframes dsptb-breathe{
+  0%,100%{border-color:var(--tone)}
+  50%{border-color:var(--tone-glow)}
+}
+.dsptb .card.tone-green,.dsptb .card.tone-blue{
+  --tone-glow:color-mix(in srgb,var(--tone) 62%,#000);
+  animation:dsptb-breathe 2.4s ease-in-out infinite;
+}
+body[data-ds-dark-theme] .dsptb .card.tone-green,
+body[data-ds-dark-theme] .dsptb .card.tone-blue{
+  --tone-glow:color-mix(in srgb,var(--tone) 34%,#fff);
+}
+/* 鼠标压上去就停 —— 要读卡片的时候，眼前不该一直有个东西在动 */
+.dsptb .card.tone-green:hover,.dsptb .card.tone-blue:hover{animation-play-state:paused}
+@media (prefers-reduced-motion:reduce){
+  .dsptb .card.tone-green,.dsptb .card.tone-blue{animation:none;border-color:var(--tone)}
+}
 .dsptb .card h4{
   display:flex;align-items:baseline;gap:5px;
   padding-left:18px;
