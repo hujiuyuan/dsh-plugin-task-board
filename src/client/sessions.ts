@@ -67,6 +67,11 @@ export interface SessionCatalog {
   parents: ReadonlyMap<string, string>
   /** 全部会话 id（含子代理）。 */
   ids: string[]
+  /**
+   * 此刻在跑的（含子代理）。目前只有一个用处：分辨「一轮还开着」是被打断了
+   * 还是它正在跑（见 `src/client/signals.ts` 里那条翻案）。
+   */
+  running: ReadonlySet<string>
 }
 
 /** 会话行投影成任务行时用的 id 前缀 —— 跟账本 id 不可能撞。 */
@@ -113,7 +118,7 @@ export function useSessionCatalog(ctx: any): SessionCatalog {
   return catalog
 }
 
-const EMPTY_CATALOG: SessionCatalog = { rows: [], updatedAt: new Map(), parents: new Map(), ids: [] }
+const EMPTY_CATALOG: SessionCatalog = { rows: [], updatedAt: new Map(), parents: new Map(), ids: [], running: new Set() }
 
 /** 快照 → 目录。认不出的整条跳过，不猜。 */
 export function catalogOf(snapshot: any): SessionCatalog {
@@ -123,6 +128,7 @@ export function catalogOf(snapshot: any): SessionCatalog {
   const updatedAt = new Map<string, number>()
   const parents = new Map<string, string>()
   const ids: string[] = []
+  const running = new Set<string>()
   for (const value of Object.values(byId) as any[]) {
     if (value === null || typeof value !== 'object') continue
     if (typeof value.id !== 'string' || value.id.length === 0) continue
@@ -130,6 +136,8 @@ export function catalogOf(snapshot: any): SessionCatalog {
     const at = typeof value.updatedAt === 'number' ? value.updatedAt : 0
     ids.push(id)
     updatedAt.set(id, at)
+    // 子代理也要记：它们不单独上板，但会决定父会话那个「下面压着东西」亮不亮
+    if (value.running === true) running.add(id)
     // 子 → 父。**父可能是我们从来没见过的会话**（被清掉过），照样记下来：
     // 冒泡时找不到它就自然停在那一层，不需要先判断它存不存在
     if (typeof value.parentId === 'string' && value.parentId.length > 0) parents.set(id, value.parentId)
@@ -152,7 +160,7 @@ export function catalogOf(snapshot: any): SessionCatalog {
   // 新在前。三个视图都会再排一次，但先把顺序定下来，免得同一份数据两个视图两种顺序
   rows.sort((a, b) => b.updatedAt - a.updatedAt)
   ids.sort()
-  return { rows, updatedAt, parents, ids }
+  return { rows, updatedAt, parents, ids, running }
 }
 
 /** 两份目录是不是说的是同一件事。挡的是「宿主推了一帧但其实没变」。 */

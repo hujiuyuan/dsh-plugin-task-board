@@ -78,6 +78,21 @@ export interface SessionFact {
    * 语义上没有关系。
    */
   goalPhase?: string
+  /**
+   * 最后一轮**开了头就没下文**：日志里有 `turn/start`，往新翻再没有配对的 `turn/end`。
+   *
+   * 值是这个 `turn/start` 记在哪一毫秒。**它不是宿主给的事实，是我们从日志形状推的** ——
+   * 所以措辞上跟 `turn.kind` 分开：正常的结束原因（含 `interrupted`）都是宿主自己写的
+   * `turn/end`，这个是「连 `turn/end` 都没留下」。
+   *
+   * **什么时候会这样**：一轮还开着，进程就被硬杀了（强退、断电、崩溃）。软退出不算 ——
+   * 宿主关应用时会补一条 `aborted/disposed`。
+   *
+   * 推得出「开着」，推不出「是不是还开着」：会话此刻正在跑的轮**长得一模一样**。
+   * 所以这一条只是**候选**，得由拿得到「它在不在跑」的那一侧（浏览器半体，
+   * 见 `src/client/signals.ts`）定夺，不能自己当成事故报出去。
+   */
+  unfinishedAt?: number
   /** 是「读的过程失败了」，不是「没有这一轮」。这条为真时 `turn` 不可信。 */
   unreadable?: boolean
   /** 读不出来时的一句话原因，给界面显示。 */
@@ -99,8 +114,16 @@ export const addressOf = (sessionId: string): { kind: 'session'; sessionId: stri
  */
 const TAIL_EVENTS = 200
 
-/** 往回翻几页。跟上面一个道理：正常一页就够，多翻几页是为了不误报「没跑过」。 */
-const MAX_PAGES = 3
+/**
+ * 往回翻几页。跟上面一个道理：正常一页就够，多翻几页是为了不误报「没跑过」。
+ *
+ * **3 → 8（2026-10-14）**：现在还要靠它找 `turn/start`（见 `SessionFact.unfinishedAt`）。
+ * 被硬杀掉的那一轮多半是长轮次，`turn/start` 离尾巴可能有一两千条事件，
+ * 翻 3 页（600 条）根本够不着，于是「被杀」看起来跟「没跑过」一模一样。
+ * 代价只在**没有 `turn/end` 的会话**上：有结论的会话第一页就返回了，
+ * 一条都不多读；而长会话的 `hasMore` 为假时也会立刻停。
+ */
+const MAX_PAGES = 8
 
 /** 缓存：同一个会话、同一个最新序号，答案不会变。 */
 interface CacheEntry {
@@ -163,6 +186,13 @@ async function readOne(
    */
   let goalPhase: string | undefined
   let sawGoalChange = false
+  /*
+   * 「开了头没下文」的候选 —— 见 `SessionFact.unfinishedAt`。
+   * `sawEnd` 是**从新往旧扫**这个次序的关键：一旦碰到过 `turn/end`，
+   * 再往旧走的 `turn/start` 都是它自己那一轮的（配过对了），不算。
+   */
+  let unfinishedAt: number | undefined
+  let sawEnd = false
   for (let page = 0; page < MAX_PAGES; page += 1) {
     let result: any
     try {
@@ -198,7 +228,13 @@ async function readOne(
     let turn: TurnFact | undefined
     for (let index = records.length - 1; index >= 0; index -= 1) {
       const event = records[index]?.event
-      if (turn === undefined && event?.type === 'turn/end') turn = turnFactOf(event)
+      if (event?.type === 'turn/end') {
+        sawEnd = true
+        if (turn === undefined) turn = turnFactOf(event)
+      }
+      if (event?.type === 'turn/start' && !sawEnd && unfinishedAt === undefined) {
+        unfinishedAt = typeof event.time === 'number' ? event.time : 0
+      }
       if (page === 0 && !sawGoalChange && event?.type === 'goal/change') {
         sawGoalChange = true
         goalPhase = goalPhaseOf(event)
@@ -212,7 +248,12 @@ async function readOne(
       if (turn !== undefined && sawGoalChange) break
     }
     if (turn !== undefined) {
-      const fact: SessionFact = { turn, ...(goalPhase === undefined ? {} : { goalPhase }) }
+      const fact: SessionFact = {
+        turn,
+        ...(goalPhase === undefined ? {} : { goalPhase }),
+        // 上一轮有结论、最新那一轮却没有 —— 两个都带上，由下游挑（见 `unfinishedAt`）
+        ...(unfinishedAt === undefined ? {} : { unfinishedAt }),
+      }
       cache.set(sessionId, { cursor, fact })
       return fact
     }
@@ -231,8 +272,11 @@ async function readOne(
    *
    * 读不到目标时**不缓存**：它下一轮跑完就该有结论了，而 cursor 在那之前不会变。
    */
-  if (sawGoalChange) {
-    const fact: SessionFact = goalPhase === undefined ? {} : { goalPhase }
+  if (sawGoalChange || unfinishedAt !== undefined) {
+    const fact: SessionFact = {
+      ...(goalPhase === undefined ? {} : { goalPhase }),
+      ...(unfinishedAt === undefined ? {} : { unfinishedAt }),
+    }
     cache.set(sessionId, { cursor, fact })
     return fact
   }

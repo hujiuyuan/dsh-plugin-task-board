@@ -295,7 +295,7 @@ land here, so the two surfaces can never disagree about a card* —— 两条路
 
 | 色 | 意思 | 信号 | 来源 |
 |---|---|---|---|
-| **红** | 这一轮没走完，你得看一眼 | `turn/end.reason.kind` ∈ `error` / `max-tokens` / `aborted` / `interrupted` | 会话事件日志 |
+| **红** | 这一轮没走完，你得看一眼 | `turn/end.reason.kind` ∈ `error` / `max-tokens` / `aborted` / `interrupted`；或者**开了头没下文**（见下） | 会话事件日志 |
 | **橙** | 它**停住了**，等你做一个动作 | `pendingInteraction.kind` ∈ `approval` / `question` / `plan-review`；`goal.phase === 'blocked'` | 宿主实时推送 |
 | **绿** | 它自己宣布目标达成 | 最后一条 `goal/change` 的 `goal.phase === 'complete'` | 会话事件日志 |
 | **蓝** | 跑完一轮，轮到你了 | `reason.kind === 'completed'`（会话）／账本 `done` + 上次执行 `succeeded`（任务卡） | 会话事件日志 |
@@ -334,6 +334,20 @@ CSS 里是一条 `:not(.tone-cascade)` 规则覆盖全部纯色，以后再加�
 `RATE_LIMIT` / `QUOTA` / `ACCOUNT_QUOTA` / `AUTH` / `INVALID_CREDENTIAL` / `NO_ADAPTER` /
 `CONTEXT_WINDOW_EXCEEDED` …），源码注释原话是 *"route on this, never by parsing `message`"*。
 所以代码里**一个字符都不解析错误文本** —— 原文只用来显示，从来不用来判断。
+
+**「开了头没下文」也是红的那一种。** 日志里有 `turn/start`、往新翻再没有配对的 `turn/end` ——
+一轮还开着，进程就被硬杀了（强退、断电、崩）。软退出不算：宿主关应用时会补一条
+`aborted/disposed`，那走上面那条路。
+
+这一条有个坑：**它跟「它此刻正在跑」在日志里一模一样**（都是「有开头、没结尾」）。
+所以宿主半体只报「候选」（`unfinishedAt`），**是不是事故由浏览器半体凭会话目录里的
+`running` 定夺** —— 判错了会很难看：一个正在跑的会话顶着红框，或者一个被硬杀的会话
+一片安静。翻案过的那个会话这一格就是「没有结论」，不回退到更早那条 `turn/end`
+（它说的是上一轮，而上一轮已经被这一轮顶掉了）。
+
+顺带：这类会话**往回翻的页数放宽到 8 页**（原来 3 页 / 600 条）。被硬杀的往往是长轮次，
+`turn/start` 离尾巴一两千条，翻 3 页够不着 —— 于是「被杀」看起来跟「没跑过」一模一样。
+代价只落在**没有 `turn/end` 的会话**上：有结论的会话第一页就返回了，一条都不多读。
 
 **读不出来 ≠ 出了事。** 两者在下游长得一样（都没颜色），但意思完全不同：
 一个是「它还没跑完过一整轮」，一个是「我读不出来，你别信我」。所以这两种分开报，
@@ -450,7 +464,7 @@ npm run verify    # 提交前自检，见下
 第 3 步会真的往磁盘写文件（归纳缓存、人工改动），所以那一段开始前把 `DSH_HOME`
 换成一个临时目录——自检不该在你的 `~/.dsh` 里留东西。
 
-界面那一半另外有一套浏览器套件（headless Chrome 真渲染 + 真点击，552 条断言），
+界面那一半另外有一套浏览器套件（headless Chrome 真渲染 + 真点击，558 条断言），
 在 `/tmp/dsptb-client/`，不进仓库。
 
 `npm run build` 打包前会先跑一遍 `tsc`。esbuild 只转译不做类型检查，有些错它能

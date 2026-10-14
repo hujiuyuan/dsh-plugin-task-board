@@ -124,6 +124,18 @@ const bad = (name, detail) => {
       { event: { type: 'turn/end', seq: 20, time: 2000, data: { turn: 2, reason: { kind: 'error', error: { message: 'insufficient balance', code: 'QUOTA' } } } } },
     ],
     's-none': [{ event: { type: 'turn/start', seq: 5, time: 500, data: { turn: 1 } } }],
+    // 上一轮跑完了，之后又开了一轮、**没有下一条 turn/end** —— 硬杀的现场
+    's-cut': [
+      { event: { type: 'turn/end', seq: 10, time: 1000, data: { turn: 1, reason: { kind: 'completed' } } } },
+      { event: { type: 'user/message', seq: 11, time: 1100, data: {} } },
+      { event: { type: 'turn/start', seq: 12, time: 1200, data: { turn: 2 } } },
+    ],
+    // 反面：`turn/start` 在最后一次 `turn/end` **之前**，那是配过对的，不算事故
+    's-paired': [
+      { event: { type: 'turn/start', seq: 10, time: 1000, data: { turn: 1 } } },
+      { event: { type: 'step/end', seq: 19, time: 1900, data: {} } },
+      { event: { type: 'turn/end', seq: 20, time: 2000, data: { turn: 1, reason: { kind: 'completed' } } } },
+    ],
     's-ok': [{ event: { type: 'turn/end', seq: 9, time: 900, data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'hook', reason: 'deepseek-account/signed-out' } } } } }],
     /*
      * 目标的**最后一条变化排在最后一次 turn/end 之前** —— 真机日志里就是这个顺序：
@@ -142,6 +154,14 @@ const bad = (name, detail) => {
       { event: { type: 'goal/change', seq: 50, time: 5000, data: { kind: 'goal/change', operation: 'clear', cleared: { id: 'g2', revision: 2 } } } },
     ],
   }
+  /* `s-deep` 每一页给不同的东西，所以要按调用次数发牌 */
+  const deepCalls = new Map()
+  const deepPages = [
+    [{ event: { type: 'step/end', seq: 90, time: 9000, data: {} } }],
+    [{ event: { type: 'step/start', seq: 80, time: 8000, data: {} } }],
+    [{ event: { type: 'assistant/message', seq: 70, time: 7000, data: {} } }],
+    [{ event: { type: 'turn/start', seq: 60, time: 6000, data: { turn: 3 } } }],
+  ]
   const fakeGateway = {
     invoke: async ({ namespace, method, args }) => {
       gatewayCalls.push({ namespace, method })
@@ -151,6 +171,18 @@ const bad = (name, detail) => {
       if (method !== 'page') throw new Error(`意外的网关方法 ${method}`)
       const id = args.request.address.sessionId
       if (id === 's-boom') throw new Error('读事件炸了')
+      /*
+       * 一轮还开着、而且**开在很旧的地方**：`turn/start` 在第四页上。
+       * 用来钉住「往回翻几页」那个数 —— 翻 3 页（600 条）够不着它，
+       * 于是一个被硬杀的长轮次看起来跟「这个会话没跑过」一模一样。
+       */
+      if (id === 's-deep') {
+        const nth = deepCalls.get(id) ?? 0
+        deepCalls.set(id, nth + 1)
+        const page = deepPages[nth]
+        if (page === undefined) return { records: [], hasMore: false }
+        return { records: page, hasMore: nth < deepPages.length - 1 }
+      }
       if (id === '__follow_only__') throw new Error('不该走 invoke，follow 是流')
       return { records: factFixtures[id] ?? [], hasMore: false }
     },
@@ -423,7 +455,7 @@ const bad = (name, detail) => {
   // 但读完就压成一句 "agent turn ended with an error" 写进账本 ——
   // 真实账本里那条就是这个字符串，`QUOTA` 和 `SERVER` 全被抹平了。
   {
-    const facts = await call(`${mod.SESSION_FACTS_PATH}?ids=s-two,s-none,s-ok,s-boom,s-goal,s-cleared`)
+    const facts = await call(`${mod.SESSION_FACTS_PATH}?ids=s-two,s-none,s-ok,s-boom,s-goal,s-cleared,s-cut,s-paired,s-deep`)
     if (facts.status !== 200 || facts.body.ok !== true) bad('host: 会话事实路由回 200+ok', JSON.stringify(facts.body))
     else ok('host: 会话事实路由回 200+ok')
 
@@ -468,6 +500,33 @@ const bad = (name, detail) => {
     if (facts.body.facts?.['s-none']?.turn !== undefined || facts.body.facts?.['s-none']?.unreadable === true) {
       bad('host: 没有 turn/end 的会话既不报结论也不报失败', JSON.stringify(facts.body.facts?.['s-none']))
     } else ok('host: 没有 turn/end 的会话既不报结论也不报失败')
+
+    /*
+     * **一轮开着、进程被硬杀**：日志里只有开头没有结尾。这是除了「没跑过」
+     * 之外的第二种「没有 turn/end」，宿主半体要**报出来**（报成 `unfinishedAt`
+     * 这个候选，不是直接报结论 —— 会话此刻正在跑的话长得一模一样，
+     * 由拿得到「它在不在跑」的那一侧定夺）。
+     */
+    const noneFact = facts.body.facts?.['s-none']
+    if (noneFact?.unfinishedAt !== 500) bad('host: 开了头没下文的轮次报成候选', JSON.stringify(noneFact))
+    else ok('host: 开了头没下文的轮次报成候选', String(noneFact.unfinishedAt))
+
+    const cut = facts.body.facts?.['s-cut']
+    if (cut?.unfinishedAt !== 1200) bad('host: 硬杀：报出那条没结尾的 turn/start', JSON.stringify(cut))
+    else ok('host: 硬杀：报出那条没结尾的 turn/start', String(cut.unfinishedAt))
+    // 上一轮的结论照样带着 —— 两个都给，由下游挑
+    if (cut?.turn?.kind !== 'completed') bad('host: 硬杀：上一轮的结论没被抹掉', JSON.stringify(cut?.turn))
+    else ok('host: 硬杀：上一轮的结论没被抹掉', cut.turn.kind)
+
+    // 反面：配过对的那些 turn/start 一条都不许被当成事故
+    if (facts.body.facts?.['s-paired']?.unfinishedAt !== undefined) {
+      bad('host: 配过对的 turn/start 不算事故', JSON.stringify(facts.body.facts?.['s-paired']))
+    } else ok('host: 配过对的 turn/start 不算事故')
+
+    // 开在很旧的地方（第四页）的那一轮也要翻得出来
+    if (facts.body.facts?.['s-deep']?.unfinishedAt !== 6000) {
+      bad('host: 开在很旧地方的那一轮也翻得出来', JSON.stringify(facts.body.facts?.['s-deep']))
+    } else ok('host: 开在很旧地方的那一轮也翻得出来', String(facts.body.facts['s-deep'].unfinishedAt))
 
     if (facts.body.facts?.['s-boom']?.unreadable !== true) {
       bad('host: 读事件失败时带 unreadable 标记', JSON.stringify(facts.body.facts?.['s-boom']))

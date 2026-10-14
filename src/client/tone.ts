@@ -240,6 +240,11 @@ export function toneReason(input: ToneInput): string | undefined {
     return '你按了停止，这一轮没走完'
   }
   if (turn.kind === 'interrupted') return 'DSH 重启打断了这一轮'
+  /*
+   * 「开了头就没下文」—— 连 `turn/end` 都没留下，跟上面那条（宿主自己写了
+   * `reason.kind === 'interrupted'`）是两回事，别混成一句话。
+   */
+  if (turn.kind === 'unfinished') return '上一轮开了头就没下文了 —— 多半是进程被硬杀掉，这一轮没走完'
   if (turn.kind === 'error') {
     const cause = turn.code === undefined ? undefined : CAUSE_LABEL[turn.code]
     const base = cause ?? '这一轮报错结束了'

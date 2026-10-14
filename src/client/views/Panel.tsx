@@ -89,7 +89,12 @@ export function Panel({ ctx, source, kit }: PanelProps) {
    * 会话的处境。**要放在索引之前** —— 归档过哪些会话是 `tasksFromSessions`
    * 的输入之一（归档的会话要落到「归档」列，而不是混在待审阅里）。
    */
-  const signals = useSignals(ctx, { ids: catalog.ids, updatedAt: catalog.updatedAt, parents: catalog.parents })
+  const signals = useSignals(ctx, {
+    ids: catalog.ids,
+    updatedAt: catalog.updatedAt,
+    parents: catalog.parents,
+    running: catalog.running,
+  })
 
   const index = useMemo(() => {
     const taken = takenSessionIds(source.snapshot.tasks)

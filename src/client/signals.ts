@@ -83,10 +83,18 @@ export interface SignalInputs {
   updatedAt: ReadonlyMap<string, number>
   /** 谁是谁的子代理。用来把卡住往上冒泡。 */
   parents: ReadonlyMap<string, string>
+  /**
+   * 此刻在跑的会话（含子代理）。
+   *
+   * 只有一件事用它：**给「开了头没下文」那一类翻案**（见 `SessionFact.unfinishedAt`）。
+   * 日志里「一轮还开着」既可能是被打断了，也可能是它**此刻正在跑**，两者长得一样；
+   * 只有这里知道是哪一种。除此之外没有别的用途。
+   */
+  running: ReadonlySet<string>
 }
 
 export function useSignals(ctx: any, inputs: SignalInputs): Signals {
-  const { ids, updatedAt, parents } = inputs
+  const { ids, updatedAt, parents, running } = inputs
 
   const [status, setStatus] = useState<ReadonlyMap<string, SessionStatus>>(() => new Map())
   const [facts, setFacts] = useState<ReadonlyMap<string, TurnFact>>(() => new Map())
@@ -185,6 +193,14 @@ export function useSignals(ctx: any, inputs: SignalInputs): Signals {
           const next = new Map(current)
           for (const [id, fact] of Object.entries(raw as Record<string, any>)) {
             if (fact?.unreadable === true) { next.set(id, { kind: 'unknown', at: 0 }); continue }
+            /*
+             * 「开了头没下文」先原样收进来 —— 它比更早那条 `turn/end` 新，
+             * **翻不翻案在下面那个 useMemo 里判**（那里拿得到实时的 `running`，
+             * 这里只在拉取那一刻知道）。
+             */
+            if (typeof fact?.unfinishedAt === 'number') {
+              next.set(id, { kind: 'unfinished', at: fact.unfinishedAt }); continue
+            }
             const turn = fact?.turn
             if (turn === null || typeof turn !== 'object' || typeof turn.kind !== 'string') continue
             next.set(id, {
@@ -206,6 +222,30 @@ export function useSignals(ctx: any, inputs: SignalInputs): Signals {
     return () => { alive = false; clearInterval(timer) }
   }, [key, stamp, ids, updatedAt])
 
+  /*
+   * 「它正在跑」给「开了头没下文」翻案。
+   *
+   * 日志里这两个状态**一模一样**（都是「有 turn/start、没有配对的 turn/end」）：
+   * 一个是硬杀留下的事故，一个就是它此刻正在跑的那一轮。只有 `running` 分得开 ——
+   * 而 `running` 会变，所以这一步放在渲染路径上（拉取时不知道明天它还在不在跑）。
+   *
+   * 翻掉的那个会话**这一格就是没有结论**（不回退到更早那条 `turn/end`：它说的是
+   * 上一轮，而上一轮早被这一轮顶掉了）。正在跑的会话本来就在「进行中」，不上色。
+   */
+  const settledFacts = useMemo(() => {
+    let dropped = false
+    for (const [id, fact] of facts) {
+      if (fact.kind === 'unfinished' && running.has(id)) { dropped = true; break }
+    }
+    if (!dropped) return facts
+    const next = new Map<string, TurnFact>()
+    for (const [id, fact] of facts) {
+      if (fact.kind === 'unfinished' && running.has(id)) continue
+      next.set(id, fact)
+    }
+    return next
+  }, [facts, running])
+
   const pending = useMemo(() => {
     const out = new Map<string, string>()
     for (const [id, value] of status) {
@@ -221,7 +261,7 @@ export function useSignals(ctx: any, inputs: SignalInputs): Signals {
     return out
   }, [status])
 
-  const stuck = useMemo(() => countStuck(parents, pending, facts), [parents, pending, facts])
+  const stuck = useMemo(() => countStuck(parents, pending, settledFacts), [parents, pending, settledFacts])
 
   const setArchived = async (sessionId: string, archived: boolean): Promise<string | null> => {
     const body = await postJson('/api/dsh-plugin-task-board/session-archive', { sessionId, archived })
@@ -242,8 +282,8 @@ export function useSignals(ctx: any, inputs: SignalInputs): Signals {
   }
 
   return useMemo(
-    () => ({ pending, unread, facts, goalPhases, stuck, archives, factsWhy, statusWhy, setArchived }),
-    [pending, unread, facts, goalPhases, stuck, archives, factsWhy, statusWhy],
+    () => ({ pending, unread, facts: settledFacts, goalPhases, stuck, archives, factsWhy, statusWhy, setArchived }),
+    [pending, unread, settledFacts, goalPhases, stuck, archives, factsWhy, statusWhy],
   )
 }
 
