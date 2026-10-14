@@ -39,6 +39,9 @@ export const CSS = String.raw`
   --state-warn:var(--dsw-alias-state-warn-primary,#f59e0b);
   --state-error:var(--dsw-alias-state-error-primary,#ef4444);
   --business-primary:var(--dsw-alias-state-business-primary,#5686fe);
+  /* 宿主自己就有「闲着」这个状态色（浅色 #d4d4d4 / 深色 #545557），跟着主题走。
+     「待审阅」里没有别的理由可说的那些卡用它。 */
+  --state-idle:var(--dsw-alias-state-idle-primary,#8b8f96);
   --brand:var(--dsw-alias-brand-primary,#4176e6);
   --warn-bg:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#f59e0b) 12%,transparent);
   --warn-border:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#f59e0b) 35%,transparent);

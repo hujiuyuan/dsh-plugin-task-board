@@ -191,8 +191,16 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
     }
   }
 
-  const cardProps = (task: TaskRecord) => {
-    const input = toneInputOf(task, signalsOf(task))
+  /**
+   * 一张卡要的全部东西。
+   *
+   * **得知道是哪一列**：「待审阅」里没有具体理由的卡也要上一个中性的闲着色
+   * （用户的要求是「待审阅中的每个卡片都应该有自己的边框颜色」）。
+   * 别的列没有这个兜底 —— 「进行中」是还在跑、「待办」还没开跑，
+   * 那时候「闲着」根本不是一种状态。
+   */
+  const cardProps = (task: TaskRecord, column: ColumnId) => {
+    const input = toneInputOf(task, { ...signalsOf(task), column, blind: signals.factsWhy !== null })
     const tone = task.archivedAt === undefined ? toneOf(input) : undefined
     return {
       task, index, now, workspaces, selectedId, onSelect,
@@ -431,7 +439,7 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
                 </p>
               ) : shown === undefined ? (
                 items.map(task => (
-                  <Card key={task.id} column={column} {...cardProps(task)} />
+                  <Card key={task.id} column={column} {...cardProps(task, column)} />
                 ))
               ) : (
                 <>
@@ -464,7 +472,7 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
                         </div>
                         {open
                           ? group.items.map(task => (
-                              <Card key={task.id} column={column} {...cardProps(task)} />
+                              <Card key={task.id} column={column} {...cardProps(task, column)} />
                             ))
                           : null}
                       </div>
