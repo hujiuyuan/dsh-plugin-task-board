@@ -164,6 +164,10 @@ export function toneReason(input: ToneInput): string | undefined {
   if (turn.kind === 'max-tokens') return '上下文用尽了，这一轮没走完'
   if (turn.kind === 'aborted') {
     if (turn.abortKind === 'hook') return '被一个钩子中止了'
+    // `disposed` 是**会话被宿主释放掉**（关应用 / 重启那一下），跟「人按了停止」
+    // 是两回事：机器上真实存在这两种，`user` 和 `disposed` 各一个。
+    // 早先这里一律写「你按了停止」，等于把自己的重启赖到用户头上 —— 真发生过。
+    if (turn.abortKind === 'disposed') return 'DSH 关掉了这个会话，这一轮没走完'
     return '你按了停止，这一轮没走完'
   }
   if (turn.kind === 'interrupted') return 'DSH 重启打断了这一轮'
