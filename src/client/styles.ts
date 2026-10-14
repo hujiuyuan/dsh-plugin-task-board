@@ -421,15 +421,22 @@ body[data-ds-dark-theme] .dsptb .seg button[aria-pressed="true"]{background:var(
    （这段注释里一个反引号都没有是**故意的**：整个文件是一个 String.raw 模板，
    注释里写反引号会把字面量提前收尾。已经踩过四次了，build.mjs 里有专门的检查。）
 
-   ## 光往哪边「亮」是分主题的
+   ## 光往哪边「亮」：两个主题都往白走
 
-   深色主题：往白走，这是「跑马灯」本来的样子。
-   浅色主题：**反着往深走**。卡片底色在浅色下本来就是白的，往白渐变等于让
-             那道光融进白底、跑起来什么也看不见。 */
+   跑马灯的样子是「一道更亮的光扫过一条有颜色的边」，所以尾巴一律往白走。
+
+   浅色主题早先**反着往深走**，理由是「卡片底色本来就是白的，往白走等于融进白底」——
+   那个理由看错了对象：会融进白底的是**卡片底色**，而这道光是画在**边框那一圈**上的，
+   那一圈本身是饱和的颜色。往白走在浅色下照样看得见，往深走反而只是「这条边在那儿略深
+   一点点」。用户 2026-10-14 报的就是这个：「浅色外观或者跟随系统属于白天的时候，
+   跑马灯的效果不太明显」。实测两个相位之间的最大通道差：往深走 89，往白走 158
+   （深色主题同口径 146）—— 差一倍。
+
+   只有这一个变量分主题了（现在两边取值相同），别的地方不需要分。 */
 @property --dsptb-turn{syntax:'<angle>';initial-value:0deg;inherits:false}
 @keyframes dsptb-marquee{to{--dsptb-turn:360deg}}
 .dsptb .card.tone:not(.tone-cascade){
-  --tone-glow:color-mix(in srgb,var(--tone) 62%,#000);
+  --tone-glow:color-mix(in srgb,var(--tone) 34%,#fff);
   border-color:transparent;
   background-image:
     linear-gradient(var(--bg-base),var(--bg-base)),
@@ -441,9 +448,6 @@ body[data-ds-dark-theme] .dsptb .seg button[aria-pressed="true"]{background:var(
   background-origin:padding-box,border-box;
   background-clip:padding-box,border-box;
   animation:dsptb-marquee 3s linear infinite;
-}
-body[data-ds-dark-theme] .dsptb .card.tone:not(.tone-cascade){
-  --tone-glow:color-mix(in srgb,var(--tone) 34%,#fff);
 }
 /* 悬停时别让那条 hover 规则把真边框又画回来（它会盖住渐变）。
    跑马灯**不**跟着停 —— 停下来的光会变成边框上一块不动的色斑，看着像坏了。 */
