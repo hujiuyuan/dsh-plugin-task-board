@@ -121,7 +121,16 @@ export function TaskForm({ editing, index, workspaces, write, canSchedule, defau
   const workspaceOptions: Option[] = useMemo(
     () => [
       { value: '', label: '不指定（跟着看板的继承规则走）' },
-      ...workspaces.groups.filter(id => id !== '').map(id => ({ value: id, label: workspaces.nameOf(id) })),
+      /*
+       * **列宿主认得的全部工作区，不是「界面上出现过的」那些。**
+       *
+       * `groups` 只收已经有任务卡或会话的工作区 —— 而**刚建好、还空着的工作区
+       * 一件东西都没有**，于是它在新建立表单里根本选不到。用户 2026-10-16 的原话：
+       * 「我新建了一个工作区然后想创建一个任务，但是在规划视图没有办法选择新创建的
+       * 工作区」。筛选器可以只列出现过的（选了空的必然一条都没有），**建卡的面板不行**：
+       * 那里正是要往空工作区里放东西的地方。（进度页那个仪表盘同理，早先也是这么修的。）
+       */
+      ...workspaces.all.map(id => ({ value: id, label: workspaces.nameOf(id) })),
     ],
     [workspaces],
   )

@@ -85,17 +85,28 @@ export function useWorkspaces(ctx: any, ids: readonly string[], paths: readonly 
     const pull = (): void => {
       const next = readList(ctx)
       if (!alive || next.length === 0) return
-      setItems(
-        next
-          .filter(item => typeof item.workspaceId === 'string')
-          .map(item => ({
-            id: String(item.workspaceId),
-            title: typeof item.title === 'string' && item.title.length > 0 ? item.title : String(item.workspaceId),
-            path: typeof item.path === 'string' ? item.path : undefined,
-          })),
-      )
+      const rows = next
+        .filter(item => typeof item.workspaceId === 'string')
+        .map(item => ({
+          id: String(item.workspaceId),
+          title: typeof item.title === 'string' && item.title.length > 0 ? item.title : String(item.workspaceId),
+          path: typeof item.path === 'string' ? item.path : undefined,
+        }))
+      /*
+       * **内容没变就别换新的数组。** 下面的记忆化挂在 `items` 上，换一个恒等引用
+       * 就等于把任务索引、三个视图的排序分组全部重算一遍 —— 轮询之下这是每几秒一次的
+       * 白烧。（`internal/service` 那条路本来就很少触发，所以以前没这问题。）
+       */
+      setItems(prev => (same(prev, rows) ? prev : rows))
     }
     pull()
+    /*
+     * **轻量轮询。** `internal/service` 只在「服务刚出现」时响一次，可工作区是**随时
+     * 会新加的**：面板开着的时候新建一个，清单不变，那个工作区就一直选不到
+     * （用户 2026-10-16 撞上的就是这个）。这里是纯内存读一个快照，不碰磁盘也不发请求，
+     * 所以「勤快」不等于「贵」。
+     */
+    const timer = setInterval(pull, WORKSPACES_POLL_MS)
     const onService = (name: string): void => { if (name === 'workspaces') pull() }
     try {
       ctx?.on?.('internal/service', onService)
@@ -104,6 +115,7 @@ export function useWorkspaces(ctx: any, ids: readonly string[], paths: readonly 
     }
     return () => {
       alive = false
+      clearInterval(timer)
       try {
         ctx?.off?.('internal/service', onService)
       } catch {
@@ -168,6 +180,26 @@ export function useWorkspaces(ctx: any, ids: readonly string[], paths: readonly 
       ready: items.length > 0,
     }
   }, [items, ids, paths])
+}
+
+/**
+ * 工作区清单多久回来看一眼。
+ *
+ * 5 秒 vs 别处那些 15 秒：这个读的是**内存里的快照**（`list.getSnapshot()`），
+ * 不是磁盘也不是网络，快慢的代价跟 `session-facts` 那条完全不是一回事。
+ * 而它的时效性要求反而更高 —— 「我刚建的工作区」这个动作就发生在面板开着的时候。
+ */
+const WORKSPACES_POLL_MS = 5_000
+
+/** 两份清单说的是不是同一件事。挡的是「轮询读到一模一样的东西还去换引用」。 */
+function same(left: readonly Workspace[], right: readonly Workspace[]): boolean {
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index]
+    const b = right[index]
+    if (a.id !== b.id || a.title !== b.title || a.path !== b.path) return false
+  }
+  return true
 }
 
 /** 全角算 2、半角算 1 的显示宽度。 */
