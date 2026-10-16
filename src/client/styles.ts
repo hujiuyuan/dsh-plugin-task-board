@@ -544,7 +544,17 @@ body[data-ds-dark-theme] .dsptb .badge{font-size:11px;line-height:1;padding:3px 
 }
 .dsptb .card-meta>*{min-width:0}
 .dsptb .card-meta .when{font-variant-numeric:tabular-nums}
-.dsptb .card-meta .when-slot{justify-self:end}
+.dsptb .card-meta .when-slot{justify-self:end;display:flex;align-items:center;gap:6px}
+/* 待办卡片上那个「开始」。**比正文矮一点、比排期钟显眼一点** ——
+   它是这一列唯一能改变状态的东西，但也不能大过一个按钮该有的份量：
+   行高卡死在 17px 上，所以它的高度、字号都得跟着那一行来。 */
+.dsptb .card-run{
+  height:16px;padding:0 6px;border:1px solid var(--business-primary);border-radius:999px;
+  background:transparent;color:var(--business-primary);font-size:10px;line-height:14px;
+  cursor:pointer;font-family:inherit;white-space:nowrap
+}
+.dsptb .card-run:hover{background:color-mix(in srgb,var(--business-primary) 12%,transparent)}
+.dsptb .card-run:disabled{opacity:.5;cursor:default}
 .dsptb .chip{
   flex:0 0 auto;margin-left:auto;
   font-size:11px;padding:2px 7px;border-radius:999px;

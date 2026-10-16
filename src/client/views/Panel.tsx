@@ -21,6 +21,7 @@ import { useSignals } from '../signals'
 import { transcriptForModel, useTranscript } from '../session'
 import { useWorkspaces } from '../workspaces'
 import { useBoardWrite, useScheduleReady } from '../write'
+import { useExecutionRoster } from '../roster'
 import { Board } from './Board'
 import { Drawer } from './Drawer'
 import { Gantt } from './Gantt'
@@ -106,6 +107,8 @@ export function Panel({ ctx, source, kit }: PanelProps) {
 
   const enrichment = useEnrichment(ctx)
   const write = useBoardWrite()
+  /* 模式 / AI / 权限三份清单。跟着面板活一次，见 roster.ts。 */
+  const roster = useExecutionRoster(ctx)
   /** 排期那条路跟 `write` 不是一条（见 `write.ts`），所以单独问一次。 */
   const scheduleReady = useScheduleReady()
 
@@ -219,6 +222,26 @@ export function Panel({ ctx, source, kit }: PanelProps) {
     })()
   }
 
+  /**
+   * 把一张卡跑起来 —— 也就是**发起对话**。
+   *
+   * 「待办」的卡停在那儿不会自己动（那是它的意思：准备好了、还没开跑），
+   * 这个动作就是那一下。跑起来之后看板会把卡挪到「进行中」，界面上不用自己去搬 ——
+   * 镜像会推过来。
+   *
+   * 只读的会话行**不走这里**：它没有账本，没有执行提示词，也就没有「跑」这回事。
+   */
+  const runTask = (task: TaskRecord): void => {
+    void (async () => {
+      const result = await write.send({ op: 'run', taskId: task.id })
+      if (!result.ok) {
+        setToast({ text: `没跑起来：${result.error}`, tone: 'err' })
+        return
+      }
+      setToast({ text: `「${task.title}」开跑了 —— 卡片会自己挪到「进行中」`, tone: 'ok' })
+    })()
+  }
+
   const backToConversation = (): void => {
     try {
       ctx.get('layout')?.selectPanel?.(null)
@@ -313,6 +336,7 @@ export function Panel({ ctx, source, kit }: PanelProps) {
               canMove={write.ready}
               onMove={moveTask}
               onArchive={archiveTask}
+              onRun={runTask}
               signals={signals}
             />
           ) : null}
@@ -368,7 +392,8 @@ export function Panel({ ctx, source, kit }: PanelProps) {
           enrichment={enrichment}
           write={write}
           onEdit={() => setForm('edit')}
-          canSchedule={scheduleReady.ready}
+          canAct={scheduleReady.ready}
+          onRun={() => { void runTask(selected) }}
           onScheduled={message => setToast({ text: message, tone: 'ok' })}
           transcript={transcript}
           kit={kit}
@@ -386,6 +411,7 @@ export function Panel({ ctx, source, kit }: PanelProps) {
           workspaces={workspaces}
           write={write}
           canSchedule={scheduleReady.ready}
+          roster={roster}
           onClose={() => { write.clearError(); setForm(undefined) }}
           onDone={(message, openId, tone) => {
             setForm(undefined)

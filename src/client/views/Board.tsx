@@ -59,9 +59,17 @@ interface BoardProps {
   signals: Signals
   /** 归档 / 取消归档。**只有这一种操作能落到会话上。** */
   onArchive?: (task: TaskRecord, archived: boolean) => void
+  /**
+   * 把一张「待办」的卡跑起来（发起对话）。
+   *
+   * 「待办」的意思是「准备好了、还没开跑」，卡停在那儿不会自己动 ——
+   * 这个按钮就是它等的那个动作。没有写入口时不给（`undefined`），
+   * 卡片上就干脆不出现这个按钮：灰着还留个位置，等于每次都在提醒「这里少了点什么」。
+   */
+  onRun?: (task: TaskRecord) => void
 }
 
-export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll, sourceKind, onOpenBoard, canMove = false, onMove, signals, onArchive }: BoardProps) {
+export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll, sourceKind, onOpenBoard, canMove = false, onMove, signals, onArchive, onRun }: BoardProps) {
   /**
    * 正在拖的那张卡 / 悬停在哪一列。
    *
@@ -213,6 +221,8 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
       dragging: dragging?.id === task.id,
       onDragBegin: setDragging,
       onDragEnd: () => setDragging(undefined),
+      /* 「开始」只在「待办」列出现 —— 见 CardProps 里那段 */
+      ...(onRun === undefined ? {} : { onRun: () => onRun(task) }),
       tone,
       toneWhy: tone === undefined ? undefined : toneReason(input),
       /*
@@ -545,13 +555,18 @@ interface CardProps {
   canArchive: boolean
   /** 拖出「归档」会被接收（= 撤销归档）。 */
   canRestore: boolean
+  /**
+   * 把这张卡跑起来。**只有待办列那张卡会渲染它** —— 别的列要么已经在跑、
+   * 要么已经跑完（那时候该问的是「结果怎么样」，不是「再开一次」）。
+   */
+  onRun?: () => void
 }
 
 /**
  * 一张卡。**四行永远都渲染**（没内容就是空 div）——少一行的话 grid 会把后面的
  * 提上来，「第几行是什么」这条对齐就断了。
  */
-function Card({ task, column, index, now, workspaces, selectedId, onSelect, canMove, dragging, onDragBegin, onDragEnd, tone, toneWhy, canArchive, canRestore }: CardProps) {
+function Card({ task, column, index, now, workspaces, selectedId, onSelect, canMove, dragging, onDragBegin, onDragEnd, tone, toneWhy, canArchive, canRestore, onRun }: CardProps) {
   const rollup = useMemo(() => rollupOf(index, task), [index, task])
   const last = lastExecution(task)
   const running = last !== undefined && last.endedAt === undefined
@@ -708,7 +723,25 @@ function Card({ task, column, index, now, workspaces, selectedId, onSelect, canM
 
       <div className="card-meta">
         <span className="when">{when.k} {when.v}</span>
-        <span className="when-slot">{scheduleMark(task, now)}</span>
+        <span className="when-slot">
+          {/*
+            **开始** —— 待办的卡等的就是这一下。
+            摆在这一格（而不是卡片上别处）是因为它跟排期钟是同一类东西：
+            「这张卡接下来会怎么动」。位置固定、行高不变，卡片的四行模板不受影响。
+            点它不能顺带把抽屉打开，所以要把冒泡掐掉。
+          */}
+          {onRun !== undefined && column === 'todo' && !isSessionTask(task) ? (
+            <button
+              type="button"
+              className="card-run"
+              title="开始：在工作区里开一个会话，把执行提示词发过去。卡片会自己挪到「进行中」"
+              onClick={event => { event.stopPropagation(); onRun() }}
+            >
+              ▶ 开始
+            </button>
+          ) : null}
+          {scheduleMark(task, now)}
+        </span>
       </div>
     </article>
   )

@@ -8,7 +8,7 @@
  * 一起做（见 README 的已知缺口）。
  */
 import { useEffect, useMemo, useState } from 'react'
-import { STATUS, hueOf } from '../tokens'
+import { STATUS, STATUS_COLUMN, hueOf } from '../tokens'
 import type { Intent, Override } from '../derive'
 import { PRIORITY_LABEL } from '../derive'
 import { EmbeddedConversation, type SlotKit } from '../embed'
@@ -40,10 +40,15 @@ interface DrawerProps {
   write: BoardWrite
   onEdit: () => void
   /**
-   * 排期能不能改。走的是任务看板自己的 action 通道，**跟 `write` 不是一条路**
-   * （见 `write.ts` 顶上那段），所以是单独一个信号。
+   * 看板**自己那条同源 action 通道**通不通。排期、开始、收工都走它 ——
+   * 跟 `write` 那条扩展契约不是一条路（见 `write.ts` 顶上那段），所以是单独一个信号。
    */
-  canSchedule: boolean
+  canAct: boolean
+  /**
+   * 把这张卡跑起来（发起对话）。**只有「待办」才有** ——
+   * 那一列的意思正是「准备好了、还没开跑」。
+   */
+  onRun: () => void
   /** 排期改成功了。外层拿它弹一句 toast。 */
   onScheduled: (message: string) => void
   /** 最近一次执行的会话内容。 */
@@ -60,7 +65,7 @@ function modelFor(task: TaskRecord, fallback: string | null): string | null {
   return task.model !== undefined && task.model.length > 0 ? task.model : fallback
 }
 
-export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOpenSession, intent, enrichment, write, onEdit, canSchedule, onScheduled, transcript, transcriptText, kit, ctx }: DrawerProps) {
+export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOpenSession, intent, enrichment, write, onEdit, canAct, onRun, onScheduled, transcript, transcriptText, kit, ctx }: DrawerProps) {
   const [tab, setTab] = useState<Tab>('conversation')
   const [copied, setCopied] = useState(false)
 
@@ -178,6 +183,25 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
             <span style={{ width: 7, height: 7, borderRadius: '50%', background: STATUS[task.status].css }} aria-hidden="true" />
             {STATUS[task.status].label}
           </span>
+          {/*
+            **开始** —— 把这张卡跑起来，也就是发起对话。
+            只有「待办」有：那一列的意思正是「准备好了、还没开跑」，卡停在这儿不会自己动。
+            它是抽屉里唯一的主按钮（其余都是次按钮）：用户点开一张待办的卡，
+            十有八九就是来开它的。
+          */}
+          {!isSession && STATUS_COLUMN[task.status] === 'todo' ? (
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={!canAct}
+              title={canAct
+                ? '在工作区里开一个会话，把执行提示词发过去 —— 卡片会自己挪到「进行中」'
+                : '开始要走任务看板自己的动作通道，但现在走不通 —— 去任务看板里点它那张卡上的运行'}
+              onClick={onRun}
+            >
+              开始
+            </button>
+          ) : null}
           {/* 会话行没有账本，编辑按钮不是禁用而是根本不出现 ——
               灰着还留个位置，等于每次都在提醒「这里少了点什么」 */}
           {isSession ? null : (
@@ -339,7 +363,7 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
                 </div>
               </div>
 
-              <ScheduleSection task={task} canWrite={canSchedule} onChanged={onScheduled} />
+              <ScheduleSection task={task} canWrite={canAct} onChanged={onScheduled} />
             </>
           ) : null}
 

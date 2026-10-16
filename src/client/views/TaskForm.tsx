@@ -4,9 +4,10 @@
  * ## 这个模态框为什么比原型小得多
  *
  * 原型那个表单有六个分节、二十来个字段（优先级、周期标记、目标 / 场景 / 背景 /
- * 验收、编排模板和模板参数……）。真实账本能收的就这几个：
+ * 验收、编排模板和模板参数……）。真实账本收的就这几个：
  * **标题、说明、执行提示、工作区、父任务**（`TaskBoardTaskDraft`），
- * 加上「开在哪一列」和**排期**（排期是建完之后补第二次调用，见下）。
+ * 加上「开在哪一列」、**执行目标（模式 / AI / 权限）**和**排期** ——
+ * 后两样都是建完之后补第二次调用，见下。
  *
  * 剩下那些硬塞进去只有两种下场：要么写不进去（看板直接拒绝），
  * 要么我们自己在本地存一份，然后账本和界面对不上。两种都比字段少更糟。
@@ -29,6 +30,14 @@
  * 上（见 `write.ts` 顶上那段）。所以新建时排期是**两次调用**：先建卡拿到 id，
  * 再拿这个 id 去排期。
  *
+ * ## 执行目标走的是**第三条路**
+ *
+ * 模式 / AI / 权限**不在** `TaskBoardTaskDraft` 里（那份契约只有标题、说明、
+ * 执行提示、列、父任务、工作区），`patchContent` 也不收 —— 它们只存在于看板自己的
+ * 同源 action 通道上（`kind:'update'` 的 `mode` / `model` / `permission`）。
+ * 所以跟排期一样是「建完再补一刀」，界面上也要照样说清楚哪一刀没落下去。
+ * 只填了标题就建卡的人完全不会碰到这条路。
+ *
  * 两次调用就有「第一次成了、第二次没成」的中间态，这里**不藏它**：
  * 卡是真建出来了，那就照实说卡建好了、排期没排上、为什么，并且照样把它打开 ——
  * 卡在手里，去抽屉里再排一次就行。假装整个都失败了会让人以为卡没建出来，
@@ -42,6 +51,8 @@ import type { TaskRecord, TaskStatus } from '../types'
 import type { WorkspaceIndex } from '../workspaces'
 import type { BoardWrite, SchedulePatch } from '../write'
 import { writeSchedule } from '../write'
+import type { ExecutionRoster } from '../roster'
+import { FOLLOW_HOST_DEFAULT } from '../roster'
 import { CRON_PRESETS, Dropdown, type Option } from './controls'
 
 /**
@@ -76,6 +87,8 @@ interface TaskFormProps {
   write: BoardWrite
   /** 排期那条通道通不通。跟 `write` 不是一回事，见 `write.ts`。 */
   canSchedule: boolean
+  /** 模式 / AI / 权限三份清单（读不到就是空的，界面上会说明）。 */
+  roster: ExecutionRoster
   /** 新建时的默认归属：当前看板筛选的工作区、或父任务。 */
   defaultWorkspaceId?: string
   onClose: () => void
@@ -86,7 +99,7 @@ interface TaskFormProps {
   onDone: (message: string, openId?: string, tone?: 'ok' | 'err') => void
 }
 
-export function TaskForm({ editing, index, workspaces, write, canSchedule, defaultWorkspaceId, onClose, onDone }: TaskFormProps) {
+export function TaskForm({ editing, index, workspaces, write, canSchedule, roster, defaultWorkspaceId, onClose, onDone }: TaskFormProps) {
   const isEdit = editing !== undefined
   const [title, setTitle] = useState(editing?.title ?? '')
   const [description, setDescription] = useState(editing?.description ?? '')
@@ -94,6 +107,16 @@ export function TaskForm({ editing, index, workspaces, write, canSchedule, defau
   const [workspaceId, setWorkspaceId] = useState(editing?.workspaceId ?? defaultWorkspaceId ?? '')
   const [parentId, setParentId] = useState(editing?.parentId ?? '')
   const [status, setStatus] = useState<TaskStatus>(editing?.status ?? 'todo')
+  /*
+   * 执行目标。**空串 = 跟宿主默认走**（不写这个字段），跟工作区那个下拉同一个写法。
+   *
+   * 权限单独说一句：它**钉上之后清不掉** —— 看板那条路的校验只认三个值，
+   * 发空串或 null 会把整条动作拒掉。所以编辑一张已经钉过权限的卡时，
+   * 「跟宿主默认走」这一档干脆不出现（见下面的 permissionOptions）。
+   */
+  const [mode, setMode] = useState(editing?.mode ?? '')
+  const [model, setModel] = useState(editing?.model ?? '')
+  const [permission, setPermission] = useState<string>(editing?.permission ?? '')
   /**
    * 排期。**空字符串 = 不排期**，是这个字段唯一的「关」的写法。
    *
@@ -146,6 +169,39 @@ export function TaskForm({ editing, index, workspaces, write, canSchedule, defau
     [index.roots, editing?.id],
   )
 
+  const modeOptions: Option[] = useMemo(() => [
+    ...(editing?.mode === undefined ? [{ value: '', label: FOLLOW_HOST_DEFAULT }] : []),
+    ...roster.modes.map(item => ({
+      value: item.id,
+      // 跑不起来的预设照样列出来，但把原因写在名字后面 —— 藏掉它，
+      // 用户会以为设置里那个预设插件没读到
+      label: item.broken === undefined ? item.name : `${item.name}（现在用不了：${item.broken}）`,
+    })),
+  ], [roster.modes, editing?.mode])
+
+  const modelOptions: Option[] = useMemo(() => [
+    { value: '', label: FOLLOW_HOST_DEFAULT },
+    ...roster.models.map(item => ({ value: item.id, label: item.name === item.id ? item.id : `${item.name} · ${item.id}` })),
+  ], [roster.models])
+
+  const permissionOptions: Option[] = useMemo(() => [
+    // 已经钉过权限的卡不给「清掉」这一档 —— 看板没开这个口子（见上面的注释）
+    ...(editing?.permission === undefined ? [{ value: '', label: FOLLOW_HOST_DEFAULT }] : []),
+    ...roster.permissions.map(item => ({ value: item.value, label: `${item.label} —— ${item.why}` })),
+  ], [roster.permissions, editing?.permission])
+
+  /** 这一轮用户想钉的执行目标。只放**选了的**，没选的不写字段（写空串才是清）。 */
+  const wantedTargets = useMemo(() => ({
+    ...(mode.length > 0 ? { mode } : {}),
+    ...(model.length > 0 ? { model } : {}),
+    ...(permission.length > 0 ? { permission: permission as 'read-only' | 'workspace-write' | 'danger-full-access' } : {}),
+  }), [mode, model, permission])
+
+  /** 编辑时：这三个动过没有。没动就不发，免得留一条假的修改记录。 */
+  const targetsChanged = isEdit && (
+    mode !== (editing?.mode ?? '') || model !== (editing?.model ?? '') || permission !== (editing?.permission ?? '')
+  )
+
   const titleMissing = title.trim().length === 0
   // 标题是唯一硬性的：账本里 title 是必填，空标题会被看板直接拒绝。
   // 与其发过去等它报错，不如在本地就把按钮灰掉并说清为什么
@@ -181,7 +237,19 @@ export function TaskForm({ editing, index, workspaces, write, canSchedule, defau
         const result = await write.send({ op: 'status', taskId: editing.id, status })
         if (!result.ok) return
       }
-      onDone(contentChanged || status !== editing.status ? '改好了' : '什么都没改', editing.id)
+      if (targetsChanged) {
+        // 跟内容分开报错：内容改成了、模式没设上，是**做了一半**，不能报「改好了」
+        const targets: Record<string, string> = {}
+        if (mode !== (editing.mode ?? '')) targets.mode = mode
+        if (model !== (editing.model ?? '')) targets.model = model
+        if (permission !== (editing.permission ?? '')) targets.permission = permission
+        const result = await write.send({ op: 'targets', taskId: editing.id, targets })
+        if (!result.ok) {
+          onDone(`内容改好了，但模式 / AI / 权限没设上：${result.error}`, editing.id, 'err')
+          return
+        }
+      }
+      onDone(contentChanged || status !== editing.status || targetsChanged ? '改好了' : '什么都没改', editing.id)
       return
     }
 
@@ -199,28 +267,44 @@ export function TaskForm({ editing, index, workspaces, write, canSchedule, defau
     if (!result.ok) return
 
     const when = cron.trim()
-    // 没排期，或者看板那边没有 id 回来（真出过：宿主半体只回了 ok）——
-    // 第一种是正常路径，第二种**说清楚排期没排上**，不能当没这回事
-    if (when.length === 0) {
-      onDone(`建好了：${title.trim()}`, result.id)
-      return
-    }
+    const targets = wantedTargets
+    const wantsTargets = Object.keys(targets).length > 0
+    // 看板那边没有 id 回来（真出过：宿主半体只回了 ok）—— 后面这两刀都补不上
     if (result.id === undefined) {
+      if (!wantsTargets && when.length === 0) {
+        onDone(`建好了：${title.trim()}`, undefined)
+        return
+      }
       onDone(
-        `「${title.trim()}」建好了，但宿主没把它的 id 回来，排期没排上。去看板里找这张卡，在「任务目标」那一页排`,
+        `「${title.trim()}」建好了，但宿主没把它的 id 回来，${when.length > 0 ? '排期和执行目标' : '执行目标'}没设上。去看板里找这张卡补一下`,
         undefined,
         'err',
       )
       return
     }
 
-    const scheduled = await writeSchedule(result.id, { enabled: true, mode: 'cron', cron: when })
-    if (!scheduled.ok) {
+    /*
+     * 建完之后要补的几刀。**一刀一刀来，缺哪刀说哪刀** ——
+     * 一次性说「没全成」等于让人再去试一遍，而试之前他得知道是哪一步。
+     */
+    const missing: string[] = []
+    if (wantsTargets) {
+      const pinned = await write.send({ op: 'targets', taskId: result.id, targets })
+      if (!pinned.ok) missing.push(`模式 / AI / 权限没设上：${pinned.error}`)
+    }
+    if (when.length > 0) {
+      const scheduled = await writeSchedule(result.id, { enabled: true, mode: 'cron', cron: when })
+      if (!scheduled.ok) missing.push(`排期没排上：${scheduled.error}`)
+    }
+    if (missing.length > 0) {
       // 卡是真的建出来了。照实说，并且照样打开它 —— 假装整个失败会让人再建一张
-      onDone(`「${title.trim()}」建好了，但排期没排上：${scheduled.error}`, result.id, 'err')
+      onDone(`「${title.trim()}」建好了，但${missing.join('；')}`, result.id, 'err')
       return
     }
-    onDone(`建好了：${title.trim()}（${humanCron(when)} 自动跑）`, result.id)
+    onDone(
+      when.length > 0 ? `建好了：${title.trim()}（${humanCron(when)} 自动跑）` : `建好了：${title.trim()}`,
+      result.id,
+    )
   }
 
   return (
@@ -313,6 +397,60 @@ export function TaskForm({ editing, index, workspaces, write, canSchedule, defau
                 {isEdit && status === 'backlog'
                   ? '它在账本里还是「待规划」。选一次「待办」就会升成可跑。'
                   : '「待规划」和「待办」在界面上是一列——对扫一眼的人来说给的是同一个信息。'}
+              </span>
+            </div>
+          </div>
+
+          {/*
+            执行目标：模式 / AI / 权限。**跑起来才用得上**，所以它们排在工作区后面 ——
+            先定「在哪儿跑」，再定「用什么跑」。三份清单都读不到时照样显示，
+            只是每条只有「跟宿主默认走」一档：藏掉整行的话，用户会以为插件的
+            表单就是没有这个能力，而不是「这台机器没配」。
+          */}
+          <div className="fld-row">
+            <div className="fld">
+              <span className="fl">模式</span>
+              <Dropdown
+                className="full"
+                value={mode}
+                options={modeOptions}
+                ariaLabel="模式"
+                onChange={setMode}
+              />
+              <span className="ro-reason">
+                {roster.modesWhy !== null
+                  ? `读不到 Agent 预设（${roster.modesWhy}），跑的时候跟宿主默认`
+                  : '用哪套 Agent 预设跑。产物写在哪、能不能动手，都由它定。'}
+              </span>
+            </div>
+            <div className="fld">
+              <span className="fl">AI</span>
+              <Dropdown
+                className="full"
+                value={model}
+                options={modelOptions}
+                ariaLabel="AI"
+                onChange={setModel}
+              />
+              <span className="ro-reason">
+                {roster.modelsWhy !== null
+                  ? `读不到模型清单（${roster.modelsWhy}），跑的时候跟宿主默认`
+                  : '钉一个模型跑这张卡。不钉就是设置里那个默认模型。'}
+              </span>
+            </div>
+            <div className="fld">
+              <span className="fl">权限</span>
+              <Dropdown
+                className="full"
+                value={permission}
+                options={permissionOptions}
+                ariaLabel="权限"
+                onChange={setPermission}
+              />
+              <span className="ro-reason">
+                {editing?.permission === undefined
+                  ? '跑的时候给多大的权限。空着＝跟宿主默认。'
+                  : '这张卡已经钉过权限了 —— 看板那边只认这三档，钉上就换不回「默认」。'}
               </span>
             </div>
           </div>

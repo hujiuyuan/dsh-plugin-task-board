@@ -72,18 +72,19 @@ function requestId(): string {
 }
 
 /**
- * 改一条排期。
+ * 往看板那条同源通道发一个动作，把几种失败翻译成一句人话。
  *
- * 返回看板自己的话，**不做翻译**：它拒绝的理由（表达式不合法、时区认不出、
- * 单次时间已经过去了、卡被归档了……）比我们转述一遍准确。
+ * @param action - 动作本体，字段名对着看板的 `TaskBoardAction` 抄。
+ * @param what - 补在「去任务看板自己那里做」前面的那两个字（「排期」「开始」…）。
+ *   这句话是说给一个**按了按钮没反应**的人听的：得告诉他去哪儿能办成。
  */
-export async function writeSchedule(taskId: string, patch: SchedulePatch): Promise<WriteResult> {
+async function boardAction(action: Record<string, unknown>, what: string): Promise<WriteResult> {
   let response: Response
   try {
     response = await fetch(BOARD_ACTION_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ requestId: requestId(), action: { kind: 'set-schedule', taskId, patch } }),
+      body: JSON.stringify({ requestId: requestId(), action }),
     })
   } catch (cause) {
     return { ok: false, error: cause instanceof Error ? cause.message : String(cause) }
@@ -91,10 +92,10 @@ export async function writeSchedule(taskId: string, patch: SchedulePatch): Promi
 
   // 403 = 它那道同源闸没放行；404 = 它的路由根本不在（没装 / 启动时降级）
   if (response.status === 403) {
-    return { ok: false, error: '任务看板没有接受这次请求（它只认同源的浏览器调用）。排期得去任务看板自己那里改。' }
+    return { ok: false, error: `任务看板没有接受这次请求（它只认同源的浏览器调用）。${what}得去任务看板自己那里做。` }
   }
   if (response.status === 404) {
-    return { ok: false, error: '任务看板的路由不在（它没装，或者启动时降级了）。排期得去任务看板自己那里改。' }
+    return { ok: false, error: `任务看板的路由不在（它没装，或者启动时降级了）。${what}得去任务看板自己那里做。` }
   }
 
   const body = await response.json().catch(() => undefined) as Record<string, unknown> | undefined
@@ -102,6 +103,69 @@ export async function writeSchedule(taskId: string, patch: SchedulePatch): Promi
     return { ok: false, error: String(body?.error ?? `任务看板拒绝了这次改动（HTTP ${response.status}）`) }
   }
   return { ok: true }
+}
+
+/**
+ * 改一条排期。
+ *
+ * 返回看板自己的话，**不做翻译**：它拒绝的理由（表达式不合法、时区认不出、
+ * 单次时间已经过去了、卡被归档了……）比我们转述一遍准确。
+ */
+export async function writeSchedule(taskId: string, patch: SchedulePatch): Promise<WriteResult> {
+  return await boardAction({ kind: 'set-schedule', taskId, patch }, '排期')
+}
+
+/** 跑这张卡时用的执行目标 —— 也走同源通道，理由见上面那段。 */
+export interface ExecutionTargets {
+  /**
+   * Agent 预设 id（`agentPresets.list` 那一套）。**空串 = 清掉**，卡退回宿主默认：
+   * 看板自己的 `normalizeTargetId` 把空串当成「没钉」。
+   */
+  mode?: string
+  /** `provider/model`（或裸模型 id）。空串 = 清掉。 */
+  model?: string
+  /**
+   * 权限预设。**只有这三档，而且钉上之后清不掉** —— 看板那条路的校验
+   * （`isTaskPermission`）只认这三个字符串，空串和 null 都会让**整条动作**被拒
+   * （不是「清空这个字段」，是「这个请求不合法」）。所以界面上不提供
+   * 「跟随宿主默认」这一档来清除已钉的值，只在没钉过时留空。
+   */
+  permission?: 'read-only' | 'workspace-write' | 'danger-full-access'
+}
+
+/** 权限那三档，名字和解释都在这里，界面别另写一份。 */
+export const PERMISSIONS: ReadonlyArray<{ value: NonNullable<ExecutionTargets['permission']>; label: string; why: string }> = [
+  { value: 'read-only', label: '只读', why: '只能看，不能改任何文件' },
+  { value: 'workspace-write', label: '可写工作区', why: '能在工作区里读写，工作区外面不行' },
+  { value: 'danger-full-access', label: '完全放开', why: '不做限制，它会自己决定改什么' },
+]
+
+/**
+ * 钉住 / 改掉一张卡的执行目标（模式 / AI / 权限）。
+ *
+ * 走看板自己的 `update` 动作。**扩展面（`host.tasks.create` / `patchContent`）上
+ * 根本没有这三个字段** —— 只有标题、说明、执行提示、列、父任务、工作区。
+ * 所以跟排期一样只能走同源通道；看板自己的新建表单写进去的也是这三个字段名。
+ */
+export async function writeTargets(taskId: string, targets: ExecutionTargets): Promise<WriteResult> {
+  const patch: Record<string, string> = {}
+  if (targets.mode !== undefined) patch.mode = targets.mode
+  if (targets.model !== undefined) patch.model = targets.model
+  if (targets.permission !== undefined) patch.permission = targets.permission
+  if (Object.keys(patch).length === 0) return { ok: true, id: taskId }
+  return await boardAction({ kind: 'update', taskId, patch }, '模式 / AI / 权限')
+}
+
+/**
+ * 把一张卡跑起来 —— 也就是**发起对话**。
+ *
+ * 「待办」的意思是「准备好了、还没开跑」，它不会自己动。这个动作就是那一下：
+ * 看板会在工作区里开一个会话、把执行提示词发过去，卡自己挪到「进行中」。
+ *
+ * 会被拒的情况（看板原话带回）：卡正在跑（运行锁）、工作区选不出来、卡被归档了。
+ */
+export async function writeRun(taskId: string): Promise<WriteResult> {
+  return await boardAction({ kind: 'run', taskId }, '开始')
 }
 
 /**
@@ -152,6 +216,13 @@ export type WriteOp =
    */
   | { op: 'archive'; taskId: string }
   | { op: 'restore'; taskId: string }
+  /**
+   * 钉住执行目标（模式 / AI / 权限）。同样**不走扩展面** ——
+   * `TaskBoardTaskDraft` 和 `patchContent` 都不收这三个字段。
+   */
+  | { op: 'targets'; taskId: string; targets: ExecutionTargets }
+  /** 把卡跑起来（发起对话）。见 `writeRun`。 */
+  | { op: 'run'; taskId: string }
 
 /** 新建时看板收的字段，一个不多一个不少（`TaskBoardTaskDraft`）。 */
 export interface TaskDraft {
@@ -255,6 +326,16 @@ export function useBoardWrite(): BoardWrite {
        */
       if (action.op === 'archive' || action.op === 'restore') {
         const result = await writeArchive(action.taskId, action.op === 'archive')
+        if (!result.ok) setError(result.error)
+        return result
+      }
+      if (action.op === 'targets') {
+        const result = await writeTargets(action.taskId, action.targets)
+        if (!result.ok) setError(result.error)
+        return result
+      }
+      if (action.op === 'run') {
+        const result = await writeRun(action.taskId)
         if (!result.ok) setError(result.error)
         return result
       }
