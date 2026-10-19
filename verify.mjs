@@ -12,7 +12,7 @@
 import { build } from 'esbuild'
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -229,6 +229,17 @@ const bad = (name, detail) => {
     }),
     get: name => (name === 'taskBoard' ? board : name === 'llm' ? fakeLlm : name === 'typertGateway' ? fakeGateway : undefined),
   }
+  // 任务引擎一 apply 就会读写 `$DSH_HOME/dsh-plugin-task-board/tasks.json`（第一次还会从旧账本导入）。
+  // 自检不能动用户真实的 `~/.dsh`：先把真账本拷进一个临时根目录，整个自检都在那里跑。
+  const realHome = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
+  const engineHome = mkdtempSync(join(tmpdir(), 'dsptb-engine-'))
+  mkdirSync(join(engineHome, 'task-board'), { recursive: true })
+  try {
+    writeFileSync(join(engineHome, 'task-board', 'ledger-v2.json'), readFileSync(join(realHome, 'task-board', 'ledger-v2.json')))
+  } catch {
+    // 本机没有旧账本：引擎从空开始，账本那几条照旧报「不存在」
+  }
+  process.env.DSH_HOME = engineHome
   const dispose = mod.apply(ctx)
   for (const [name, path] of [['health', mod.HEALTH_PATH], ['ledger', mod.LEDGER_PATH], ['enrich', mod.ENRICH_PATH], ['overrides', mod.OVERRIDES_PATH], ['session-facts', mod.SESSION_FACTS_PATH], ['session-archive', mod.SESSION_ARCHIVE_PATH]]) {
     if (!routes.has(path)) bad(`host: 注册了 ${name} 路由`, [...routes.keys()].join(', '))
@@ -362,57 +373,47 @@ const bad = (name, detail) => {
   else if ('别的字段' in saved) bad('host: 不认识的键被丢掉', JSON.stringify(saved))
   else ok('host: 浏览器发上来的脏值被挡在盘外', JSON.stringify(saved))
 
-  // ── 写操作 ────────────────────────────────────────────────────────
-  //
-  // 这一块要验的是**三个边界**：走的是看板给的口子（不是直接改账本文件）、
-  // 看板不在场时说清楚、以及浏览器发上来的东西不会被当成合法动作。
-  if (registered === undefined) {
-    bad('host: 向任务看板注册了扩展', 'registerExtension 没被调用')
-  } else {
-    if (registered.apiVersion !== 1) bad('host: 扩展声明的 apiVersion 是 1', String(registered.apiVersion))
-    else if (registered.id !== pkg.name) bad('host: 扩展 id 等于包名', `id=${registered.id}`)
-    else ok('host: 向任务看板注册了扩展', `id=${registered.id} · apiVersion=${registered.apiVersion}`)
-  }
-
+  // ── 写操作：规划视图自己的任务引擎 ─────────────────────────────────
   const ready = await call(mod.WRITE_PATH)
-  if (ready.body.ok !== true || ready.body.ready !== true) bad('host: 有看板时写入口是就绪的', JSON.stringify(ready.body))
-  else ok('host: 有看板时写入口是就绪的')
+  if (ready.body.ok !== true || ready.body.ready !== true) bad('host: 引擎起来后写入口是就绪的', JSON.stringify(ready.body))
+  else ok('host: 引擎起来后写入口是就绪的')
 
   const created = await call(mod.WRITE_PATH, { method: 'POST', body: { op: 'create', draft: { title: '从自检建的卡', description: 'd', prompt: 'p', status: 'todo' } } })
-  if (created.body.ok !== true || created.body.task?.id !== 'new-1') bad('host: create 转给了看板', JSON.stringify(created.body))
-  else if (boardCalls.at(-1)?.draft?.title !== '从自检建的卡') bad('host: create 的 draft 原样传过去', JSON.stringify(boardCalls.at(-1)))
-  else ok('host: create 转给了看板并拿回 id', created.body.task.id)
+  const createdId = created.body.task?.id
+  if (created.body.ok !== true || typeof createdId !== 'string') bad('host: 新建拿回 id', JSON.stringify(created.body))
+  else ok('host: 新建拿回 id', createdId)
 
-  const patched = await call(mod.WRITE_PATH, { method: 'POST', body: { op: 'patch', taskId: 't9', patch: { title: '改过的' } } })
-  if (patched.body.ok !== true || boardCalls.at(-1)?.op !== 'patch' || boardCalls.at(-1)?.taskId !== 't9') {
-    bad('host: patch 转给了看板', JSON.stringify([patched.body, boardCalls.at(-1)]))
-  } else ok('host: patch 转给了看板', JSON.stringify(boardCalls.at(-1).patch))
+  const patched = await call(mod.WRITE_PATH, { method: 'POST', body: { op: 'patch', taskId: createdId, patch: { title: '改过的' } } })
+  const listed = await call(mod.TASKS_PATH)
+  const mine = listed.body.tasks?.find(task => task.id === createdId)
+  if (patched.body.ok !== true || mine?.title !== '改过的') bad('host: 改标题落到了引擎里', JSON.stringify([patched.body, mine?.title]))
+  else ok('host: 改标题落到了引擎里')
 
-  const moved = await call(mod.WRITE_PATH, { method: 'POST', body: { op: 'status', taskId: 't9', status: 'done' } })
-  if (moved.body.ok !== true || boardCalls.at(-1)?.op !== 'status') bad('host: setStatus 转给了看板', JSON.stringify([moved.body, boardCalls.at(-1)]))
-  else ok('host: setStatus 转给了看板', `${boardCalls.at(-1).taskId} → ${boardCalls.at(-1).status}`)
+  const moved = await call(mod.WRITE_PATH, { method: 'POST', body: { op: 'status', taskId: createdId, status: 'done' } })
+  const movedTask = (await call(mod.TASKS_PATH)).body.tasks?.find(task => task.id === createdId)
+  if (moved.body.ok !== true || movedTask?.status !== 'done') bad('host: 挪列落到了引擎里', JSON.stringify([moved.body, movedTask?.status]))
+  else ok('host: 挪列落到了引擎里')
 
   // 认不出的 op 要明确拒绝，**不能当没看见** —— 前端会以为成功了
-  const bogus = await call(mod.WRITE_PATH, { method: 'POST', body: { op: '删库', taskId: 't9' } })
+  const bogus = await call(mod.WRITE_PATH, { method: 'POST', body: { op: '删库', taskId: createdId } })
   if (bogus.body.ok !== false || bogus.body.reason !== 'refused' || !bogus.body.detail.includes('认不出')) {
     bad('host: 认不出的操作被拒绝', JSON.stringify(bogus.body))
   } else ok('host: 认不出的操作被拒绝', bogus.body.detail)
 
-  // 看板拒绝时把它的原话带回去（不是我们转述一遍）
-  boardFace.patchContent = () => { throw new Error('这张卡已经开始跑过了，它的标题/说明/提示不能再改') }
-  const refused = await call(mod.WRITE_PATH, { method: 'POST', body: { op: 'patch', taskId: 't9', patch: { title: 'x' } } })
-  if (refused.body.ok !== false || !refused.body.detail.includes('已经开始跑过了')) {
-    bad('host: 看板拒绝时原话带回去', JSON.stringify(refused.body))
-  } else ok('host: 看板拒绝时原话带回去')
+  // 引擎拒绝时给人话
+  const refused = await call(mod.WRITE_PATH, { method: 'POST', body: { op: 'patch', taskId: createdId, patch: { title: '  ' } } })
+  if (refused.body.ok !== false || !refused.body.detail.includes('标题不能为空')) {
+    bad('host: 引擎拒绝时给人话', JSON.stringify(refused.body))
+  } else ok('host: 引擎拒绝时给人话', refused.body.detail)
 
-  // 看板不在场：写入口整个关掉，而且**不是错误** —— 看板本来就可能没装。
+  // 会话网关不在场：任务照样能读能改（不需要会话），只是「开始」不了 —— 写入口要说清这一点。
   // 这里重新 import 一份（加个注释打散 URL 缓存），用另一个什么都不提供的 ctx 跑一遍。
   const lonely = await import(`data:text/javascript;base64,${Buffer.from(`${code}\n// lonely`).toString('base64')}`)
   const lonelyRoutes = new Map()
   lonely.apply({
     webServer: { register: route => { lonelyRoutes.set(route.path, route); return () => {} } },
     logger: { warn: () => {} },
-    // 服务永远不出现：模拟看板没装
+    // 服务永远不出现：模拟网关没到
     inject: () => {},
     get: () => undefined,
   })
@@ -431,11 +432,14 @@ const bad = (name, detail) => {
     return JSON.parse(text)
   }
   if (!lonelyRoutes.has(mod.WRITE_PATH)) {
-    bad('host: 看板不在场时也注册写路由', [...lonelyRoutes.keys()].join(', '))
+    bad('host: 没有网关时也注册写路由', [...lonelyRoutes.keys()].join(', '))
   } else {
     const gate = await probe(mod.WRITE_PATH)
-    if (gate.ready !== false) bad('host: 看板不在场时写入口是关的', JSON.stringify(gate))
-    else ok('host: 看板不在场时写入口是关的并给了原因', gate.detail)
+    if (gate.ready !== true || gate.gateway !== false) bad('host: 没有网关时能写、但标明开始不了', JSON.stringify(gate))
+    else ok('host: 没有网关时能写、但标明开始不了')
+    const run = await probe(mod.WRITE_PATH, { op: 'run', taskId: 'x' })
+    if (run.ok !== false || !/网关/.test(run.detail ?? '')) bad('host: 没有网关时「开始」被拒并说明原因', JSON.stringify(run))
+    else ok('host: 没有网关时「开始」被拒并说明原因', run.detail)
   }
   if (!lonelyRoutes.has(mod.ENRICH_PATH)) {
     // 路由整个不在 = 浏览器拿到 404，于是报「宿主半体可能没装上」——
@@ -670,11 +674,6 @@ const bad = (name, detail) => {
       bad('host: 卸载后能重新注册（走一遍 cordis 的卸载→重跑）', String(error))
     }
     void routes2
-    // 扩展注册也要还回去，不然同一个看板会被注册第二遍
-    if (!boardCalls2.includes('off')) {
-      bad('host: 卸载时把看板扩展也注销掉', JSON.stringify(boardCalls2))
-    } else ok('host: 卸载时把看板扩展也注销掉')
-
     // 装到一半炸了不能留残骸：cordis 那次 collect 根本没发生（execute 抛了就没有
     // 返回值可收），留下的路由会让下一次重试再撞一次 —— 失败一次就再也起不来
     const half = new Map()
@@ -754,6 +753,8 @@ const bad = (name, detail) => {
   }
 
   await rm(sandbox, { recursive: true, force: true })
+  await rm(engineHome, { recursive: true, force: true })
+  process.env.DSH_HOME = realHome
 
   if (warnings.length > 0) bad('host: apply 期间没有告警', warnings.join(' / '))
   else ok('host: apply 期间没有告警')

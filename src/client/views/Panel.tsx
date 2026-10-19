@@ -250,19 +250,7 @@ export function Panel({ ctx, source, kit }: PanelProps) {
     }
   }
 
-  /**
-   * 跳到任务看板那个面板。面板 id 是任务看板自己定死的（`TASK_BOARD_PANEL_ID`），
-   * 不是我们说了算 —— 所以它没装、或者宿主没给 layout 时，这个动作就不该出现。
-   */
-  const openBoard = source.snapshot.kind === 'board' && ctx.get('layout')?.selectPanel !== undefined
-    ? (): void => {
-        try {
-          ctx.get('layout').selectPanel('task-board')
-        } catch {
-          // 面板 id 对不上时宿主自己会忽略，这里不重复报错
-        }
-      }
-    : undefined
+  const openBoard = undefined
 
   const openSession = (sessionId: string): boolean => {
     for (const name of ['uiWorkspace']) {
@@ -433,10 +421,10 @@ function SourceBadge({ source }: { source: TaskSource }) {
   const { snapshot, refresh, refreshing } = source
   if (snapshot.kind === 'board') {
     return (
-      <span className="src-badge live" title="数据来自任务看板的客户端服务，改动会立刻反映到这里">
+      <span className="src-badge live" title="数据来自规划视图自己的任务引擎，改动会立刻推到这里">
         <span className="dot" aria-hidden="true" />
         <span>实时</span>
-        {snapshot.boardEnabled === false ? <span className="src-note">（看板的扩展开关关着）</span> : null}
+        {snapshot.boardEnabled === false ? <span className="src-note">（会话网关还没就绪，暂时不能「开始」）</span> : null}
       </span>
     )
   }
@@ -502,15 +490,14 @@ function Banner({ source, factsWhy, statusWhy }: { source: TaskSource; factsWhy:
   const withFacts = (data: ReactElement | null): ReactElement | null => <>{facts}{data}</>
 
   if (snapshot.kind === 'unavailable' && snapshot.reason === 'starting') {
-    return withFacts(<div className="banner" role="status">正在找数据…先问任务看板，问不到再读账本。</div>)
+    return withFacts(<div className="banner" role="status">正在连任务引擎…</div>)
   }
 
   if (snapshot.kind === 'unavailable') {
     const text =
-      snapshot.reason === 'ledger-missing' ? '账本文件还不存在——任务看板大概没跑过。'
-      : snapshot.reason === 'schema-mismatch'
-        ? `账本格式对不上：文件里是第 ${snapshot.schema?.actual ?? '未知'} 代，本插件认得第 ${(snapshot.schema?.supported ?? []).join(' / ') || '未知'} 代。不猜字段，所以什么都不画 —— 升级本插件，或者把任务看板退回到那一代。`
-      : '任务看板没在场，账本也读不到。'
+      snapshot.reason === 'engine-failed'
+        ? `任务引擎没起来：${snapshot.detail ?? '原因未知'}`
+        : `连不上任务引擎（${snapshot.detail ?? snapshot.reason ?? '原因未知'}）。宿主半体可能没装上，重启 DSH 试试。`
     return withFacts(
       <div className="banner" role="status">
         <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" aria-hidden="true">

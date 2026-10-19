@@ -189,15 +189,10 @@ export function Toggle({
   )
 }
 
-/**
- * 「一条任务都没有」那句话得看数据是从哪来的。
- *
- * 读的是账本快照时，屏幕上根本没有「任务看板」这个东西（多半是没装、或者没加载），
- * 这时候让用户「去任务看板里建一张卡」等于让人去一个不存在的地方。
- */
+/** 「一条任务都没有」那句话。 */
 export function emptyTaskCopy(kind: 'board' | 'ledger' | 'unavailable'): { title: string; body: string } {
   return kind === 'board'
-    ? { title: '还没有任务', body: '在任务看板里建一张卡，这里就有了。' }
+    ? { title: '还没有任务', body: '点右上角的「+」建一张卡。' }
     : { title: '账本里一条任务都没有', body: '这个视图读的是账本快照本身；账本是空的，就没有可画的。' }
 }
 

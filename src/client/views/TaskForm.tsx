@@ -77,7 +77,7 @@ const EDIT_COLUMNS: readonly ColumnId[] = ['todo', 'running', 'review']
 const DEFAULT_CRON = '0 9 * * *'
 
 /** 排期那条路走不通时的统一说法。路由探不到、或者控件被禁用，写的都是它。 */
-const SCHEDULE_WHY = '排期要走任务看板自己的写入通道，但现在走不通 —— 卡照样建得出来，排期得去任务看板里设'
+const SCHEDULE_WHY = '任务引擎没起来，排期设不了'
 
 interface TaskFormProps {
   /** 有值＝编辑那张卡；没有＝新建。 */
@@ -528,7 +528,7 @@ export function TaskForm({ editing, index, workspaces, write, canSchedule, roste
           ) : null}
 
           {write.error !== null ? (
-            <p className="fb-error" role="alert">看板拒绝了这次修改：{write.error}</p>
+            <p className="fb-error" role="alert">没改成：{write.error}</p>
           ) : null}
         </div>
 

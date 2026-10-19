@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-task-board",
   "description": "规划视图 Task Board：DeepSeek Harness 的任务规划面板（看板 / 甘特 / 进度）",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "entry": {
     "name": "dsh-plugin-task-board",
     "inject": [

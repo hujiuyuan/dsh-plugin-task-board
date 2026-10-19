@@ -685,7 +685,7 @@ function Card({ task, column, index, now, workspaces, selectedId, onSelect, canM
         {session ? (
           <span
             className="badge-session"
-            title="这不是任务看板里的卡，是一个没有挂卡的会话。它按「在跑 / 停着」归列，也改不了"
+            title="这不是任务卡，是一个没有挂卡的会话。它按「在跑 / 停着」归列，也改不了"
           >
             会话
           </span>

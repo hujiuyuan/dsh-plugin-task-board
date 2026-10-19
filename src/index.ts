@@ -1,21 +1,12 @@
 /**
- * dsh-plugin-task-board · 宿主半体（薄）。
+ * dsh-plugin-task-board · 宿主半体。
  *
- * 它只做一件事：**在浏览器半体拿不到任务看板的客户端服务时，把账本读给它看**。
+ * 规划视图**自己就是任务引擎**：存任务、开会话跑任务、盯会话进度、定时触发，
+ * 全在 `engine/` 里。原来这些靠第三方的「任务看板」插件，现在不依赖它了；
+ * 它留下的账本 `$DSH_HOME/task-board/ledger-v2.json` 只在第一次启动时导入一次，
+ * 之后不再读，也从不写。
  *
- * 为什么需要：本插件的首选数据源是任务看板自己的客户端 face
- * （`resolveTaskBoardClientFace(ctx)` → `snapshot()` / `subscribe()`）。那条路
- * 只在看板活着时成立，而看板是**另一个第三方插件**——它会掉出 `dsh.profile.bundles`
- * （本机就掉过一次）。掉了之后浏览器半体读不到任何数据，页面只能空着。
- *
- * 所以这里读一份账本快照当兜底：`$DSH_HOME/task-board/ledger-v2.json`。**只读**，
- * 不写、不锁、不动别人的文件。
- *
- * 两条刻意划下的边界：
- *   1. **只读**。这个插件第一版是只读分析层，写只能走看板的公开契约
- *      （`taskBoard.registerExtension` 那条路），绝不直接改别人的账本。
- *   2. **schemaVersion 不符就明说**。账本是别人插件的私有文件，格式随对方版本漂移；
- *      版本对不上时返回 `degraded` 而不是硬猜字段——猜错出来的图比空白更糟。
+ * 另外几条路由是分析层的：模型归纳、人工改动、会话结论、会话归档，存在插件自己的目录里。
  */
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
@@ -32,6 +23,8 @@ import {
   type Material,
 } from './enrich'
 import { readFacts, type GatewayFace, type SessionFact } from './sessionfacts'
+import { Refusal, TaskEngine, type EngineSnapshot, type SchedulePatch } from './engine/engine'
+import { createOwnerPeer, Runner, withPeer, type CommandsFace, type RawGateway, type WorkspaceRegistryFace } from './engine/runner'
 
 declare const __PLUGIN_VERSION__: string
 const PLUGIN_VERSION = typeof __PLUGIN_VERSION__ === 'undefined' ? 'dev' : __PLUGIN_VERSION__
@@ -51,7 +44,7 @@ interface WebServerRoute {
 
 interface HostContext {
   webServer?: { register(route: WebServerRoute): () => void }
-  logger?: { warn(message: string): void }
+  logger?: { warn(message: string): void; info?(message: string): void }
   /** 宿主注入的模型服务。装没装、什么时候到，都不是我们说得了算的。 */
   llm?: LlmFace
   /**
@@ -91,6 +84,8 @@ export const OVERRIDES_PATH = '/api/dsh-plugin-task-board/overrides'
 export const WRITE_PATH = '/api/dsh-plugin-task-board/task'
 export const SESSION_FACTS_PATH = '/api/dsh-plugin-task-board/session-facts'
 export const SESSION_ARCHIVE_PATH = '/api/dsh-plugin-task-board/session-archive'
+export const TASKS_PATH = '/api/dsh-plugin-task-board/tasks'
+export const TASKS_EVENTS_PATH = '/api/dsh-plugin-task-board/tasks/events'
 
 /**
  * 插件自己的目录名，在 `$DSH_HOME` 下面。
@@ -98,6 +93,8 @@ export const SESSION_ARCHIVE_PATH = '/api/dsh-plugin-task-board/session-archive'
  */
 const OWN_DIR = 'dsh-plugin-task-board'
 const OVERRIDES_FILE = 'enrichment.json'
+/** 任务本体。规划视图自己的引擎读写它（见 `engine/engine.ts`）。 */
+const TASKS_FILE = 'tasks.json'
 const OVERRIDES_SCHEMA = 1
 /**
  * 会话归档。**只能存在我们自己这儿。**
@@ -534,101 +531,198 @@ function start(ctx: HostContext, route: (spec: WebServerRoute) => void, keep: Ke
   // 浏览器拿到的会是 404（「宿主半体没装上」），而不是「没有模型服务」。
   registerEnrich(ctx)
 
-  registerWriteRoute(ctx, route, keep)
+  registerEngine(ctx, route, keep)
+}
+
+/** 引擎可调的写操作。**动作名是白名单**，认不出就拒绝 —— 不能让前端以为成功了。 */
+async function performWrite(engine: TaskEngine, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const op = body.op
+  const object = (value: unknown, what: string): Record<string, unknown> => {
+    if (typeof value !== 'object' || value === null) throw new Refusal(`${what}要带内容`)
+    return value as Record<string, unknown>
+  }
+  switch (op) {
+    case 'create': {
+      const created = await engine.create(object(body.draft, '新建'))
+      return { task: { id: created.id, title: created.title, status: created.status } }
+    }
+    case 'patch':
+      await engine.patch(body.taskId, object(body.patch, '修改'))
+      return { taskId: body.taskId }
+    case 'status':
+      await engine.setStatus(body.taskId, body.status)
+      return { taskId: body.taskId, status: body.status }
+    case 'archive':
+    case 'restore':
+      await engine.archive(body.taskId, op === 'archive')
+      return { taskId: body.taskId }
+    case 'targets':
+      await engine.setTargets(body.taskId, object(body.targets, '执行目标'))
+      return { taskId: body.taskId }
+    case 'schedule':
+      await engine.setSchedule(body.taskId, object(body.patch, '排期') as SchedulePatch)
+      return { taskId: body.taskId }
+    case 'run':
+      return { taskId: body.taskId, ...(await engine.run(body.taskId)) }
+    default:
+      throw new Refusal(`认不出的操作「${String(op)}」`)
+  }
 }
 
 /**
- * 任务看板的**宿主半体**提供的服务名。和它浏览器半体那个同名，但两个进程里
- * 是两回事：这边的面只有 `registerExtension` 和 `isExtensionEnabled`。
+ * 宿主的斜杠命令（我们只用 `/permission`）。
+ *
+ * 宿主的 `commands.execute` 要的是**活的 Agent 对象**，不是会话 id：
+ * `execute(agent, line, args, signal)`，结果在返回值的 `result` 上。刚建的会话已经在
+ * `agents` 里；不在的（冷会话）交给 `sessionController.resolveAgent` 唤醒。
  */
-const BOARD_SERVICE = 'taskBoard'
-
-/** 我们作为一个扩展注册上去的 id。也是 `integrations` 里那份数据的键。 */
-export const EXTENSION_ID = name
-
-/** 看板自己声明的扩展契约版本。对不上它会**抛错**，不是降级。 */
-const EXTENSION_API_VERSION = 1
-
-/** 看板交给扩展的那把能力面。只写我们真正用到的三个方法。 */
-interface BoardTasksFace {
-  create(draft: Record<string, unknown>, options?: Record<string, unknown>): { id: string; title: string; status: string }
-  patchContent(taskId: string, patch: Record<string, unknown>): void
-  setStatus(taskId: string, status: string, initiator?: string): void
-}
-
-interface BoardFace {
-  registerExtension(extension: Record<string, unknown>): () => void
+function commandsOf(ctx: HostContext): CommandsFace | undefined {
+  const commands = ctx.get?.('commands') as { execute?: (...args: unknown[]) => Promise<any> } | undefined
+  if (typeof commands?.execute !== 'function') return undefined
+  return {
+    async execute(sessionId, line, signal) {
+      const agents = ctx.get?.('agents') as { get?: (id: string) => unknown } | undefined
+      let agent = agents?.get?.(sessionId)
+      if (agent === undefined) {
+        const controller = ctx.get?.('sessionController') as { resolveAgent?: (id: string) => Promise<any> } | undefined
+        const resolved = await controller?.resolveAgent?.(sessionId)
+        agent = resolved?.agent
+        if (agent === undefined) throw new Error(`会话 ${sessionId} 拿不到活的 Agent${resolved?.error?.message ? `：${resolved.error.message}` : ''}`)
+      }
+      return (await commands.execute!(agent, line, [], signal))?.result
+    },
+  }
 }
 
 /**
- * 写操作。
+ * 引擎和它的三条路由：读全量、推变化、写。
  *
- * ## 为什么绕这一圈，不直接改账本文件
- *
- * 账本是任务看板的私有文件。第三方插件直接往里写，绕过的是看板**自己的**
- * 两道闸：创建时的字段校验，和「已经跑过的卡不许改内容」这条规矩
- * （`patchContent` 的注释原话：a task that has started executing keeps its
- * recorded title/description/prompt）。绕过去写，出来的是一份看板自己都读不懂
- * 的账本——而且是在它下次启动时才炸。
- *
- * 所以走它给的口子：`ctx.get('taskBoard').registerExtension(...)`，
- * 拿到 `host.tasks`，所有写都经过它的闸。
- *
- * ## 三个必须说清的边界
- *
- * 1. **看板不在场就没有写**。它的宿主半体没加载时这条路由怎么都不通，
- *    界面上的写入口一律禁用并说明原因 —— 不做「点了才拒绝」。
- * 2. **一次只做一件事**。没有批量写、没有事务。看板那边每次调用都是一个完整的
- *    校验加落盘，我们不在中间插自己的逻辑。
- * 3. **扩展注册是可选的**：`ctx.inject([BOARD_SERVICE], ...)` 等到它出现才注册。
- *    看板晚加载也能接上，永远不加载就永远没有写入口。
+ * 引擎本身不等网关就启动 —— 读写任务不需要会话；只有「开始」和盯进度要网关，
+ * 网关没到时那两件事会明确拒绝或等着，不会让整个插件起不来。
  */
-function registerWriteRoute(
+function registerEngine(
   ctx: HostContext,
   route: (spec: WebServerRoute) => void,
   keep: Keep,
 ): void {
-  /** 看板交出来的能力面；扩展没启动时是 undefined。 */
-  let tasks: BoardTasksFace | undefined
-
-  const attach = (scope: HostContext): void => {
-    const board = (scope.get?.(BOARD_SERVICE) ?? (scope as { [k: string]: unknown })[BOARD_SERVICE]) as BoardFace | undefined
-    if (board === undefined || typeof board.registerExtension !== 'function') return
-    try {
-      // 注册的返回值也要收着 —— 不收的话，卸载再启用会给同一个看板注册第二遍
-      keep(board.registerExtension({
-        id: EXTENSION_ID,
-        apiVersion: EXTENSION_API_VERSION,
-        // start/stop 是看板的开关控制的：它把扩展停掉之后，我们不持有失效的面
-        start: (host: { tasks: BoardTasksFace }) => { tasks = host.tasks },
-        stop: () => { tasks = undefined },
-      }))
-    } catch (error) {
-      // 版本对不上时看板会抛。这是**真的出了问题**（我们和它不同版），要留痕
-      ctx.logger?.warn(`[${name}] 注册扩展失败：${String(error)}`)
-    }
+  /**
+   * 会话事件网关。**可能永远不到**（headless 部署、或者那一层还没起来），
+   * 所以是可选的：路由无条件注册，拿不到就答 `no-gateway` 并说清，
+   * **不能变成 404** —— 404 会被读成「插件没装上」，那是完全指错方向的结论。
+   *
+   * 拿到之后包一层 owner peer：0.2.1 起不带 peer 的调用一律被拒。
+   */
+  let gateway: GatewayFace | undefined
+  let runner: Runner | undefined
+  const owner = createOwnerPeer(ctx)
+  keep(owner.dispose)
+  const takeGateway = (scope: HostContext): void => {
+    const found = (scope.get?.('typertGateway') ?? (scope as Record<string, unknown>).typertGateway) as RawGateway | undefined
+    if (found === undefined || typeof found.invoke !== 'function') return
+    const wrapped = withPeer(found, owner.peer)
+    gateway = wrapped as GatewayFace
+    runner = new Runner(
+      wrapped,
+      () => commandsOf(ctx),
+      () => ctx.get?.('workspaceRegistry') as WorkspaceRegistryFace | undefined,
+    )
   }
+  if (typeof ctx.inject === 'function') ctx.inject(['typertGateway'], takeGateway)
+  else takeGateway(ctx)
 
-  if (typeof ctx.inject === 'function') ctx.inject([BOARD_SERVICE], attach)
-  else attach(ctx)
+  const engine = new TaskEngine(
+    join(dshHome(), OWN_DIR, TASKS_FILE),
+    join(dshHome(), LEDGER_RELATIVE_PATH),
+    () => runner,
+    message => ctx.logger?.warn(`[${name}] ${message}`),
+    message => ctx.logger?.info?.(`[${name}] ${message}`),
+  )
+  keep(() => engine.stop())
+  /** 引擎起不来时的原因。界面拿它说清楚，而不是一直转圈。 */
+  let failure: string | undefined
+  let ready = false
+  const started = engine.start().then(
+    () => { ready = true },
+    error => {
+      failure = error instanceof Error ? error.message : String(error)
+      ctx.logger?.warn(`[${name}] 任务引擎启动失败：${failure}`)
+    },
+  )
+
+  route({
+    kind: 'exact',
+    path: TASKS_PATH,
+    handler: async (_req: any, res: any) => {
+      await started
+      if (!ready) {
+        json(res, 200, { ok: false, reason: 'engine-failed', detail: failure })
+        return
+      }
+      json(res, 200, { ok: true, ...engine.snapshot(), gateway: runner !== undefined })
+    },
+  })
+
+  /**
+   * 推送。Server-Sent Events：连上先给一份全量，之后每改一次推一份全量。
+   * 全量而不是增量：卡就几十张，全量最不容易出「前端和后端对不上」的毛病。
+   */
+  route({
+    kind: 'exact',
+    path: TASKS_EVENTS_PATH,
+    handler: async (req: any, res: any) => {
+      await started
+      if (!ready) {
+        json(res, 503, { ok: false, reason: 'engine-failed', detail: failure })
+        return
+      }
+      res.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-store',
+        connection: 'keep-alive',
+      })
+      const send = (snapshot: EngineSnapshot): void => {
+        res.write(`data: ${JSON.stringify({ ...snapshot, gateway: runner !== undefined })}\n\n`)
+      }
+      send(engine.snapshot())
+      const unsubscribe = engine.subscribe(send)
+      // 每 25 秒一个注释行，别让中间哪一层把空闲连接掐了
+      const heartbeat = setInterval(() => res.write(': ping\n\n'), 25_000)
+      const close = (): void => {
+        clearInterval(heartbeat)
+        unsubscribe()
+      }
+      req?.on?.('close', close)
+      res?.on?.('close', close)
+      keep(() => {
+        close()
+        try {
+          res.end()
+        } catch {
+          // 连接已经断了
+        }
+      })
+    },
+  })
 
   route({
     kind: 'exact',
     path: WRITE_PATH,
     handler: async (req: any, res: any) => {
-      // GET = 「能不能写」。界面靠这个决定写入口是亮着还是禁用 ——
-      // 不做「点了才拒绝」：一个能按但按下去只弹「不行」的按钮，比灰着更气人。
+      await started
+      // GET = 「能不能写」。界面靠这个决定写入口亮不亮
       if (req?.method !== 'POST') {
         json(res, 200, {
           ok: true,
-          ready: tasks !== undefined,
-          ...(tasks === undefined
-            ? { detail: '任务看板的宿主半体没加载（或者它的扩展开关关着），所以没有写入口' }
-            : {}),
+          ready,
+          gateway: runner !== undefined,
+          ...(ready ? {} : { detail: `任务引擎没起来：${failure ?? '原因未知'}` }),
         })
         return
       }
-
+      if (!ready) {
+        json(res, 200, { ok: false, reason: 'engine-failed', detail: `任务引擎没起来：${failure ?? '原因未知'}` })
+        return
+      }
       let body: Record<string, unknown>
       try {
         body = JSON.parse(await readBody(req)) as Record<string, unknown>
@@ -636,44 +730,17 @@ function registerWriteRoute(
         json(res, 200, { ok: false, reason: 'bad-request', detail: String(error) })
         return
       }
-
-      if (tasks === undefined) {
-        json(res, 200, {
-          ok: false,
-          reason: 'board-absent',
-          detail: '任务看板的宿主半体没加载（或者它的扩展开关关着），所以没有写入口。去任务看板里直接改。',
-        })
-        return
-      }
-
       try {
-        json(res, 200, { ok: true, ...performWrite(tasks, body) })
+        json(res, 200, { ok: true, ...(await performWrite(engine, body)) })
       } catch (error) {
-        // 看板拒绝时抛的错**原样带回去**。它比我们清楚为什么不行
-        // （标题为空、卡冻结了、跑过的卡不许改内容……），转述一遍只会丢信息。
         json(res, 200, {
           ok: false,
-          reason: 'refused',
+          reason: error instanceof Refusal ? 'refused' : 'write-failed',
           detail: error instanceof Error ? error.message : String(error),
         })
       }
     },
   })
-
-  /**
-   * 会话事件网关。**可能永远不到**（headless 部署、或者那一层还没起来），
-   * 所以跟 `llm` 一样是可选的：路由无条件注册，拿不到就答 `no-gateway` 并说清，
-   * **不能变成 404** —— 404 会被读成「插件没装上」，那是完全指错方向的结论。
-   */
-  let gateway: GatewayFace | undefined
-  const takeGateway = (scope: HostContext): void => {
-    const found = (scope.get?.('typertGateway') ?? (scope as Record<string, unknown>).typertGateway) as GatewayFace | undefined
-    if (found !== undefined && typeof found.invoke === 'function') gateway = found
-  }
-  if (typeof ctx.inject === 'function') ctx.inject(['typertGateway'], takeGateway)
-  else takeGateway(ctx)
-
-  /** 缓存在这次运行里活着 —— 见 `sessionfacts.ts` 顶上那段。 */
   const factCache = new Map<string, { cursor: number; fact: SessionFact }>()
 
   route({
@@ -774,39 +841,6 @@ async function readArchive(path: string): Promise<ArchiveStore> {
 async function writeArchive(path: string, store: ArchiveStore): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   await writeFile(path, `${JSON.stringify(store, null, 2)}\n`, 'utf8')
-}
-
-/**
- * 一次写。**动作名是白名单**：浏览器发上来的 op 认不出就拒绝，
- * 不做「当作没看见」——那样前端会以为成功了。
- */
-function performWrite(tasks: BoardTasksFace, body: Record<string, unknown>): Record<string, unknown> {
-  const op = body.op
-  if (op === 'create') {
-    const draft = body.draft
-    if (typeof draft !== 'object' || draft === null) throw new Error('create 要带 draft')
-    const created = tasks.create(draft as Record<string, unknown>)
-    return { task: { id: created.id, title: created.title, status: created.status } }
-  }
-
-  const taskId = body.taskId
-  if (typeof taskId !== 'string' || taskId.length === 0) throw new Error('这个动作要带 taskId')
-
-  if (op === 'patch') {
-    const patch = body.patch
-    if (typeof patch !== 'object' || patch === null) throw new Error('patch 要带 patch')
-    tasks.patchContent(taskId, patch as Record<string, unknown>)
-    return { taskId }
-  }
-
-  if (op === 'status') {
-    const status = body.status
-    if (typeof status !== 'string') throw new Error('status 要带 status')
-    tasks.setStatus(taskId, status)
-    return { taskId, status }
-  }
-
-  throw new Error(`认不出的操作「${String(op)}」`)
 }
 
 /** 只收我们认得的形状。模型的入参来自浏览器，是外部输入。 */

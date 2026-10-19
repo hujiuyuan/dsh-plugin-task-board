@@ -196,7 +196,7 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
               disabled={!canAct}
               title={canAct
                 ? '在工作区里开一个会话，把执行提示词发过去 —— 卡片会自己挪到「进行中」'
-                : '开始要走任务看板自己的动作通道，但现在走不通 —— 去任务看板里点它那张卡上的运行'}
+                : '任务引擎没起来，现在开始不了'}
               onClick={onRun}
             >
               开始
@@ -211,7 +211,7 @@ export function Drawer({ task, index, now, workspaces, onClose, onNavigate, onOp
               disabled={!write.ready}
               title={write.ready
                 ? '改标题 / 说明 / 执行提示，或者换一列'
-                : `编辑要走任务看板的写入契约，但现在走不通：${write.why ?? '未知原因'}`}
+                : `现在改不了：${write.why ?? '未知原因'}`}
               onClick={onEdit}
             >
               编辑
@@ -731,7 +731,7 @@ function ScheduleControls({ busy, canWrite, error, currentCron, draft, onDraft, 
   enabled: boolean
   onSubmit: (patch: SchedulePatch) => void
 }) {
-  const why = '排期要走任务看板自己的写入通道，但现在走不通 —— 去任务看板里直接改'
+  const why = '任务引擎没起来，现在改不了排期'
   const off = !canWrite || busy
   const matchesPreset = CRON_PRESETS.find(item => item.cron === currentCron)
   const dirty = draft.trim().length > 0 && draft.trim() !== currentCron
@@ -790,7 +790,7 @@ function ScheduleControls({ busy, canWrite, error, currentCron, draft, onDraft, 
           type="button"
           className="btn btn-primary"
           disabled={off || !dirty}
-          title={canWrite ? '把上面这个表达式写进任务看板' : why}
+          title={canWrite ? '保存这条排期' : why}
           onClick={() => onSubmit({ enabled: true, mode: 'cron', cron: draft.trim() })}
         >
           应用
