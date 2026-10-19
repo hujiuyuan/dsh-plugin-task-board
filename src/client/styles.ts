@@ -480,8 +480,11 @@ body[data-ds-dark-theme] .dsptb .seg button[aria-pressed="true"]{background:var(
 }
 .dsptb .card h4 .ttl{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .dsptb .card h4 .nogol{flex:0 0 auto}
-.dsptb .card-tags{display:flex;flex-wrap:nowrap;align-items:center;gap:4px;overflow:hidden}
-.dsptb .card-tags .badge{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 标签行定高 17px。放不下的标签**整枚折到看不见的第二行**，不再被裁成「第…」「还…」半截；
+   完整的标签列表在卡片的悬停气泡里。单枚就超长的标签自己省略号。 */
+.dsptb .card-tags{display:flex;flex-wrap:wrap;align-items:center;align-content:flex-start;gap:4px;overflow:hidden;height:17px;row-gap:8px}
+.dsptb .card-tags>*{max-width:100%}
+.dsptb .card-tags .badge{flex:0 0 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsptb .card-tags .prio,.dsptb .card-tags .badge-manual,.dsptb .card-tags .badge-sub{flex:0 0 auto}
 .dsptb .badge-sub{
   font-size:11px;line-height:1;padding:3px 6px;border-radius:5px;
@@ -534,21 +537,23 @@ body[data-ds-dark-theme] .dsptb .badge{font-size:11px;line-height:1;padding:3px 
   font-size:11px;color:var(--label-tertiary);white-space:nowrap;
 }
 .dsptb .card-sub .cseg{display:flex;align-items:center;gap:4px;min-width:0}
-.dsptb .card-sub .nowrap{flex:0 0 auto}
+.dsptb .card-sub .nowrap{display:block;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .dsptb .card-sub .c-orch{color:var(--business-primary)}
 .dsptb .card-sub .c-orch .ttl2{flex:0 0 auto;max-width:9em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsptb .card-sub .c-orch .ostp{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* 第四行：左边时间、右边「开始 + 排期」。**放不下就把右边整块换到下一行**，
-   不能让两边叠在一起 —— 列窄时（待办卡同时有开始和排期）以前就是右边盖住左边。 */
+/* 第四行：左边时间、右边排期。**卡片是定高的四行**，这一行不能折行（折下去的那半截会被裁掉），
+   所以右边不让步、左边放不下就省略号。 */
 .dsptb .card-meta{
-  display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:4px 8px;
+  display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;
   font-size:12px;color:var(--label-secondary);white-space:nowrap;
 }
-.dsptb .card-meta .when{font-variant-numeric:tabular-nums}
-.dsptb .card-meta .when-slot{margin-left:auto;display:flex;align-items:center;gap:6px}
+.dsptb .card-meta>*{min-width:0}
+.dsptb .card-meta .when{font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis}
+.dsptb .card-meta .when-slot{justify-self:end;display:flex;align-items:center;gap:6px}
 /* 待办卡片上那个「开始」。**比正文矮一点、比排期钟显眼一点** ——
    它是这一列唯一能改变状态的东西，但也不能大过一个按钮该有的份量：
    行高卡死在 17px 上，所以它的高度、字号都得跟着那一行来。 */
+.dsptb .card h4 .card-run{flex:0 0 auto;align-self:center}
 .dsptb .card-run{
   height:16px;padding:0 6px;border:1px solid var(--business-primary);border-radius:999px;
   background:transparent;color:var(--business-primary);font-size:10px;line-height:14px;

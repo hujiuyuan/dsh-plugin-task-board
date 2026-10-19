@@ -622,6 +622,8 @@ function Card({ task, column, index, now, workspaces, selectedId, onSelect, canM
     // 排在描述后面就等于没说
     tone === undefined ? undefined : `【${TONE_LABEL[tone]}】${toneWhy ?? ''}`,
     task.description.length > 0 ? task.description : undefined,
+    // 卡片上一行放不下的标签会整枚藏掉，完整的在这里
+    tags.length > 0 ? `标签：${tags.map(tag => tag.name).join('、')}` : undefined,
     session ? `这一行是没有任务卡的会话。点开可以直接接着聊${canArchive ? '；拖到「归档」就是收工' : ''}` : undefined,
     // 说在动手之前。跑到一半的卡移不动是看板的规矩，等拖完再弹一句「不行」
     // 是把一句话该在前面的信息放到了后面
@@ -679,6 +681,22 @@ function Card({ task, column, index, now, workspaces, selectedId, onSelect, canM
           <span className="nogol" title="这张卡没有填执行提示，也没有说明 —— 跑起来发给 DSH 的是空的" aria-label="缺目标" />
         ) : null}
         <span className="ttl">{task.title}</span>
+        {/*
+          **开始** —— 待办的卡等的就是这一下。
+          放在标题行右端：标题本来就会截断，让出四十来像素不丢信息；放第四行的话，
+          跟时间、排期挤在一起，列一窄就叠到一块了（2026-10-19 用户截图）。
+          点它不能顺带把抽屉打开，所以要把冒泡掐掉。
+        */}
+        {onRun !== undefined && column === 'todo' && !isSessionTask(task) ? (
+          <button
+            type="button"
+            className="card-run"
+            title="开始：在工作区里开一个会话，把执行提示词发过去。卡片会自己挪到「进行中」"
+            onClick={event => { event.stopPropagation(); onRun() }}
+          >
+            ▶ 开始
+          </button>
+        ) : null}
       </h4>
 
       <div className="card-tags">
@@ -736,22 +754,6 @@ function Card({ task, column, index, now, workspaces, selectedId, onSelect, canM
       <div className="card-meta">
         <span className="when">{when.k} {when.v}</span>
         <span className="when-slot">
-          {/*
-            **开始** —— 待办的卡等的就是这一下。
-            摆在这一格（而不是卡片上别处）是因为它跟排期钟是同一类东西：
-            「这张卡接下来会怎么动」。位置固定、行高不变，卡片的四行模板不受影响。
-            点它不能顺带把抽屉打开，所以要把冒泡掐掉。
-          */}
-          {onRun !== undefined && column === 'todo' && !isSessionTask(task) ? (
-            <button
-              type="button"
-              className="card-run"
-              title="开始：在工作区里开一个会话，把执行提示词发过去。卡片会自己挪到「进行中」"
-              onClick={event => { event.stopPropagation(); onRun() }}
-            >
-              ▶ 开始
-            </button>
-          ) : null}
           {scheduleMark(task, now)}
         </span>
       </div>
@@ -775,6 +777,21 @@ function executionSummary(task: TaskRecord): string | undefined {
  * 说的是**规则本身**（`planOf`），不直接读 `schedule.cron` —— 单次规则没有这个字段，
  * 读出来的是 undefined，气泡里就是「定时未启用 · undefined」。
  */
+/**
+ * 排期钟旁边那个时间。比 `shortTime` 更短：今天的只写时分，别的日子只写月/日。
+ * 第四行左边已经有一个完整时间了，两个完整时间并排，窄列里放不下；精确时刻在悬停气泡里。
+ */
+function compactTime(ms: number, now: number): string {
+  const date = new Date(ms)
+  const today = new Date(now)
+  if (date.toDateString() === today.toDateString()) {
+    return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  }
+  return date.getFullYear() === today.getFullYear()
+    ? `${date.getMonth() + 1}/${date.getDate()}`
+    : `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`
+}
+
 function scheduleMark(task: TaskRecord, now: number) {
   if (task.schedule === undefined) return null
   const { enabled, nextRunAt } = task.schedule
@@ -796,7 +813,7 @@ function scheduleMark(task: TaskRecord, now: number) {
   return (
     <span className="sched" title={[`定时已启用 · ${plan}`, ...extra].join('\n')}>
       <IconClock filled />
-      <span>{nextRunAt === undefined ? '已启用' : shortTime(nextRunAt, now)}</span>
+      <span>{nextRunAt === undefined ? '已启用' : compactTime(nextRunAt, now)}</span>
     </span>
   )
 }
