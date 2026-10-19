@@ -104,9 +104,21 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
     [workspaces],
   )
 
+  /*
+   * 账本说「在跑」、会话其实停在等你批准一个操作的卡，挪进待审阅 ——
+   * 无人值守的定时任务卡在授权上时，留在「进行中」看着就像还在干活。
+   */
+  const columnOf = (task: TaskRecord): ColumnId => {
+    if (task.status === 'running') {
+      const sessionId = task.fromSession ?? lastExecution(task)?.sessionId
+      if (sessionId !== undefined && signals.pending.get(sessionId) === 'approval') return 'review'
+    }
+    return STATUS_COLUMN[task.status]
+  }
+
   const columns = useMemo(() => {
     const out: Record<ColumnId, TaskRecord[]> = { running: [], review: [], todo: [], archived: [] }
-    for (const task of index.roots) out[STATUS_COLUMN[task.status]].push(task)
+    for (const task of index.roots) out[columnOf(task)].push(task)
     /*
      * 归档单独一份（`archivedRoots`），**不是从 `roots` 里筛出来的** ——
      * 归档的卡压根不在 `roots` 里（`isOnBoard` 把它们排掉了）。
@@ -150,7 +162,7 @@ export function Board({ index, now, workspaces, selectedId, onSelect, onClearAll
       }
     }
     return out
-  }, [index.roots, index.archivedRoots, now])
+  }, [index.roots, index.archivedRoots, now, signals.pending])
 
   const filtered = useMemo(() => {
     const out = {} as Record<ColumnId, TaskRecord[]>

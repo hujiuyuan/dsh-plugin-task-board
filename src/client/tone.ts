@@ -105,6 +105,8 @@ export interface ToneInput {
 export function toneOf(input: ToneInput): Tone | undefined {
   if ((input.stuckChildren ?? 0) > 0) return 'cascade'
 
+  // 卡在授权上：不批它就永远不动，按「没走完」的红色算
+  if (input.pendingKind === 'approval') return 'red'
   if (input.pendingKind !== undefined) return 'orange'
   // 目标被卡住是它自己说「我干不下去了」，带人话原因——本质还是「它在等你」
   if (input.goalPhase === 'blocked') return 'orange'
